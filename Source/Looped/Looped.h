@@ -1,0 +1,14 @@
+#pragma once
+
+#include "CoreMinimal.h"
+
+DECLARE_LOG_CATEGORY_EXTERN(LogLoopedCore, Log, All);
+DECLARE_LOG_CATEGORY_EXTERN(LogLoopedCards, Log, All);
+DECLARE_LOG_CATEGORY_EXTERN(LogLoopedWeapons, Log, All);
+DECLARE_LOG_CATEGORY_EXTERN(LogLoopedCombat, Log, All);
+DECLARE_LOG_CATEGORY_EXTERN(LogLoopedAI, Log, All);
+DECLARE_LOG_CATEGORY_EXTERN(LogLoopedSloMo, Log, All);
+DECLARE_LOG_CATEGORY_EXTERN(LogLoopedRun, Log, All);
+DECLARE_LOG_CATEGORY_EXTERN(LogLoopedGAS, Log, All);
+DECLARE_LOG_CATEGORY_EXTERN(LogLoopedUI, Log, All);
+DECLARE_LOG_CATEGORY_EXTERN(LogLoopedRooms, Log, All);

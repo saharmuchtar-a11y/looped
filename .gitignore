@@ -1,0 +1,21 @@
+# Unreal Engine
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+*.VC.db
+*.opensdf
+*.opendb
+*.sdf
+*.sln
+*.suo
+*.xcworkspace
+*.xcodeproj
+*.DS_Store
+
+# Plugins - keep source, ignore compiled
+Plugins/*/Binaries/
+Plugins/*/Intermediate/
+
+# Build
+Build/
