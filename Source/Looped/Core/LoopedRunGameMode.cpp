@@ -50,7 +50,7 @@ void ALoopedRunGameMode::SetCursorVisibility(bool bVisible)
 	}
 }
 
-void ALoopedRunGameMode::SpawnHubPortal()
+void ALoopedRunGameMode::SpawnHubPortal(FName Destination)
 {
 	if (ACharacter* Player = UGameplayStatics::GetPlayerCharacter(this, 0))
 	{
@@ -61,9 +61,9 @@ void ALoopedRunGameMode::SpawnHubPortal()
 		APortalActor* Portal = GetWorld()->SpawnActor<APortalActor>(SpawnLoc, FRotator::ZeroRotator, Params);
 		if (Portal)
 		{
-			Portal->TargetLevelName = FName(TEXT("L_Hub"));
-			Portal->SetActorLabel(TEXT("HubPortal"));
-			UE_LOG(LogLoopedRun, Display, TEXT("Hub portal spawned at (%.0f, %.0f, %.0f)"), SpawnLoc.X, SpawnLoc.Y, SpawnLoc.Z);
+			Portal->TargetLevelName = Destination;
+			Portal->SetActorLabel(TEXT("RunPortal"));
+			UE_LOG(LogLoopedRun, Display, TEXT("Portal spawned → %s"), *Destination.ToString());
 		}
 	}
 }

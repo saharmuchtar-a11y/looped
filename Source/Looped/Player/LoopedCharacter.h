@@ -90,6 +90,9 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Input")
 	TObjectPtr<UInputAction> SprintAction;
 
+	UPROPERTY(EditDefaultsOnly, Category = "Input")
+	TObjectPtr<UInputAction> CrouchAction;
+
 	// Movement params
 	UPROPERTY(EditDefaultsOnly, Category = "Movement")
 	float BaseWalkSpeed = 700.0f;
@@ -107,6 +110,8 @@ private:
 	void StopFire(const FInputActionValue& Value);
 	void StartSprint(const FInputActionValue& Value);
 	void StopSprint(const FInputActionValue& Value);
+	void StartCrouch(const FInputActionValue& Value);
+	void StopCrouch(const FInputActionValue& Value);
 
 	void HandleHealthChanged(float NewHealth, float MaxHealth);
 

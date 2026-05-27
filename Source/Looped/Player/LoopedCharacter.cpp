@@ -27,6 +27,8 @@ ALoopedCharacter::ALoopedCharacter()
 	GetCharacterMovement()->AirControl = 0.8f;
 	GetCharacterMovement()->BrakingDecelerationFalling = 0.0f;
 	GetCharacterMovement()->FallingLateralFriction = 0.0f;
+	GetCharacterMovement()->NavAgentProps.bCanCrouch = true;
+	GetCharacterMovement()->CrouchedHalfHeight = 44.0f;
 }
 
 void ALoopedCharacter::BeginPlay()
@@ -101,6 +103,11 @@ void ALoopedCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCom
 		EIC->BindAction(SprintAction, ETriggerEvent::Started, this, &ALoopedCharacter::StartSprint);
 		EIC->BindAction(SprintAction, ETriggerEvent::Completed, this, &ALoopedCharacter::StopSprint);
 	}
+	if (CrouchAction)
+	{
+		EIC->BindAction(CrouchAction, ETriggerEvent::Started, this, &ALoopedCharacter::StartCrouch);
+		EIC->BindAction(CrouchAction, ETriggerEvent::Completed, this, &ALoopedCharacter::StopCrouch);
+	}
 }
 
 void ALoopedCharacter::Move(const FInputActionValue& Value)
@@ -174,4 +181,14 @@ void ALoopedCharacter::StopSprint(const FInputActionValue& Value)
 {
 	bIsSprinting = false;
 	GetCharacterMovement()->MaxWalkSpeed = BaseWalkSpeed;
+}
+
+void ALoopedCharacter::StartCrouch(const FInputActionValue& Value)
+{
+	Crouch();
+}
+
+void ALoopedCharacter::StopCrouch(const FInputActionValue& Value)
+{
+	UnCrouch();
 }

@@ -34,7 +34,7 @@ public:
 	void SetCursorVisibility(bool bVisible);
 
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|Run")
-	void SpawnHubPortal();
+	void SpawnHubPortal(FName Destination = FName(TEXT("L_Hub")));
 
 	UFUNCTION(BlueprintPure, Category = "LOOPED|Run")
 	int32 GetCurrentRoom() const { return CurrentRoomIndex; }
