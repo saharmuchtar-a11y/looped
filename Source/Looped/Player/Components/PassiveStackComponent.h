@@ -8,6 +8,7 @@
 #include "PassiveStackComponent.generated.h"
 
 class UDataTable;
+class ULoopedGameInstance;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPassiveProc, const FGameplayTag&, EffectTag, float, Magnitude);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnCardEquipped, int32, SlotIndex, FName, CardRowName);
@@ -50,6 +51,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "LOOPED|Cards")
 	int32 GetEquippedCount() const;
 
+	// Deck queries — operate on the persistent run deck (GameInstance-owned), NOT a local copy.
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Cards")
+	int32 FindCardLevel(FName CardId) const;
+
+	// Equip (if new) or level up a card this run. Returns the new level.
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Cards")
+	int32 AddOrLevelCard(FName CardId);
+
 	void EvaluatePassives(const FHitResult& Hit, EWeaponFamily WeaponFamily, AActor* HitActor);
 
 protected:
@@ -62,8 +71,10 @@ protected:
 	float MismatchedAffinityMultiplier = 0.5f;
 
 private:
-	UPROPERTY()
-	TArray<FPassiveSlot> Slots;
+	// The deck lives on the GameInstance (survives hard OpenLevel). This component is a
+	// behavior/API layer over it — it holds NO copy of the slots (single source of truth).
+	TWeakObjectPtr<ULoopedGameInstance> CachedGI;
+	TArray<FPassiveSlot>* GetDeck() const;
 
 	float GetAffinityMultiplier(const FPassiveCardData& CardData, EWeaponFamily WeaponFamily) const;
 	void CheckEvolution(int32 SlotIndex);

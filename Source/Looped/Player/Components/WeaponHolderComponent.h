@@ -52,6 +52,12 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Defaults")
 	FName StartingWeaponRowName = FName("Branch");
 
+	// Global scalar on all outgoing player weapon damage. The weapon's own BaseDamage
+	// (from the DataTable) is multiplied by this. 1.0 = full table damage; lower = weaker
+	// player. Difficulty knob — tweakable in BP/defaults without touching the table.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Defaults", meta = (ClampMin = "0.0"))
+	float DamageMultiplier = 0.3f;
+
 private:
 	void FireWeapon();
 	void PerformMeleeAttack();

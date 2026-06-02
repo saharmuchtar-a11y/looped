@@ -1,141 +1,129 @@
 #include "PassiveStackComponent.h"
 #include "GAS/LoopedAbilitySystemComponent.h"
+#include "Core/LoopedGameInstance.h"
 #include "Looped.h"
 
 UPassiveStackComponent::UPassiveStackComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
-	Slots.SetNum(MAX_PASSIVE_SLOTS);
 }
 
 void UPassiveStackComponent::BeginPlay()
 {
 	Super::BeginPlay();
-	UE_LOG(LogLoopedCards, Display, TEXT("PassiveStackComponent initialized with %d slots"), MAX_PASSIVE_SLOTS);
+	// The deck is owned by the GameInstance (persists across hard OpenLevel). Cache it.
+	if (UWorld* World = GetWorld())
+	{
+		CachedGI = World->GetGameInstance<ULoopedGameInstance>();
+	}
+	UE_LOG(LogLoopedCards, Display, TEXT("PassiveStackComponent ready (deck-backed by GameInstance, %d slots cap)"), MAX_PASSIVE_SLOTS);
 }
 
-bool UPassiveStackComponent::EquipCard(FName CardRowName, int32 SlotIndex)
+TArray<FPassiveSlot>* UPassiveStackComponent::GetDeck() const
 {
-	if (SlotIndex < 0 || SlotIndex >= MAX_PASSIVE_SLOTS)
+	return CachedGI.IsValid() ? &CachedGI->RunDeck : nullptr;
+}
+
+bool UPassiveStackComponent::EquipCard(FName CardRowName, int32 /*SlotIndex*/)
+{
+	// Slot index is obsolete now that the deck is a dynamic, GI-owned array; this just
+	// equips/levels the card. Kept for the legacy Blueprint call site.
+	const int32 NewLevel = AddOrLevelCard(CardRowName);
+	if (NewLevel <= 0) return false;
+
+	if (TArray<FPassiveSlot>* Deck = GetDeck())
 	{
-		UE_LOG(LogLoopedCards, Error, TEXT("EquipCard: invalid slot index %d"), SlotIndex);
-		return false;
+		const int32 Idx = Deck->IndexOfByPredicate([&](const FPassiveSlot& S){ return S.CardRowName == CardRowName; });
+		if (Idx != INDEX_NONE) OnCardEquipped.Broadcast(Idx, CardRowName);
 	}
-
-	if (!ensure(PassiveCardTable))
-	{
-		UE_LOG(LogLoopedCards, Error, TEXT("EquipCard: PassiveCardTable is null"));
-		return false;
-	}
-
-	FPassiveCardData* Data = PassiveCardTable->FindRow<FPassiveCardData>(CardRowName, TEXT("EquipCard"));
-	if (!ensure(Data))
-	{
-		UE_LOG(LogLoopedCards, Error, TEXT("EquipCard: card '%s' not found in table"), *CardRowName.ToString());
-		return false;
-	}
-
-	FPassiveSlot& Slot = Slots[SlotIndex];
-	Slot.CardRowName = CardRowName;
-	Slot.CachedData = *Data;
-	Slot.TriggerCount = 0;
-	Slot.EvolutionTier = 0;
-
-	OnCardEquipped.Broadcast(SlotIndex, CardRowName);
-	UE_LOG(LogLoopedCards, Display, TEXT("Equipped '%s' to slot %d"), *Data->DisplayName.ToString(), SlotIndex);
 	return true;
 }
 
 void UPassiveStackComponent::RemoveCard(int32 SlotIndex)
 {
-	if (SlotIndex >= 0 && SlotIndex < MAX_PASSIVE_SLOTS)
+	if (TArray<FPassiveSlot>* Deck = GetDeck())
 	{
-		Slots[SlotIndex] = FPassiveSlot();
+		if (Deck->IsValidIndex(SlotIndex)) Deck->RemoveAt(SlotIndex);
 	}
 }
 
 void UPassiveStackComponent::ClearAllSlots()
 {
-	for (int32 i = 0; i < MAX_PASSIVE_SLOTS; i++)
-	{
-		Slots[i] = FPassiveSlot();
-	}
-	UE_LOG(LogLoopedCards, Display, TEXT("All passive slots cleared"));
+	if (CachedGI.IsValid()) CachedGI->ClearRunDeck();
+	UE_LOG(LogLoopedCards, Display, TEXT("Run deck cleared"));
 }
 
 const FPassiveSlot& UPassiveStackComponent::GetSlot(int32 SlotIndex) const
 {
 	static FPassiveSlot EmptySlot;
-	if (SlotIndex >= 0 && SlotIndex < MAX_PASSIVE_SLOTS)
-	{
-		return Slots[SlotIndex];
-	}
+	const TArray<FPassiveSlot>* Deck = GetDeck();
+	if (Deck && Deck->IsValidIndex(SlotIndex)) return (*Deck)[SlotIndex];
 	return EmptySlot;
 }
 
 int32 UPassiveStackComponent::GetFirstEmptySlot() const
 {
-	for (int32 i = 0; i < MAX_PASSIVE_SLOTS; i++)
-	{
-		if (Slots[i].IsEmpty()) return i;
-	}
-	return -1;
+	const TArray<FPassiveSlot>* Deck = GetDeck();
+	if (!Deck) return -1;
+	return (Deck->Num() < MAX_PASSIVE_SLOTS) ? Deck->Num() : -1;
 }
 
 int32 UPassiveStackComponent::GetEquippedCount() const
 {
-	int32 Count = 0;
-	for (const FPassiveSlot& Slot : Slots)
-	{
-		if (!Slot.IsEmpty()) Count++;
-	}
-	return Count;
+	const TArray<FPassiveSlot>* Deck = GetDeck();
+	return Deck ? Deck->Num() : 0;
 }
+
+int32 UPassiveStackComponent::FindCardLevel(FName CardId) const
+{
+	return CachedGI.IsValid() ? CachedGI->GetCardLevel(CardId) : 0;
+}
+
+int32 UPassiveStackComponent::AddOrLevelCard(FName CardId)
+{
+	return CachedGI.IsValid() ? CachedGI->AddOrLevelCard(CardId) : 0;
+}
+
+// --- Phase 2 (GAS combat) territory — iterates the same GI-owned deck. Untouched logic. ---
 
 void UPassiveStackComponent::EvaluatePassives(const FHitResult& Hit, EWeaponFamily WeaponFamily, AActor* HitActor)
 {
 	if (!HitActor) return;
+	TArray<FPassiveSlot>* Deck = GetDeck();
+	if (!Deck) return;
 
 	TMap<FGameplayTag, float> TagMagnitudes;
 
-	// Collect phase: iterate slots, check affinity, gather tag magnitudes
-	for (int32 i = 0; i < MAX_PASSIVE_SLOTS; i++)
+	for (int32 i = 0; i < Deck->Num(); ++i)
 	{
-		FPassiveSlot& Slot = Slots[i];
+		FPassiveSlot& Slot = (*Deck)[i];
 		if (Slot.IsEmpty()) continue;
 
 		const float AffinityMult = GetAffinityMultiplier(Slot.CachedData, WeaponFamily);
 		const float EvolutionBonus = (Slot.EvolutionTier >= 2) ? Slot.CachedData.EvolutionTier2Bonus :
 		                             (Slot.EvolutionTier >= 1) ? Slot.CachedData.EvolutionTier1Bonus : 0.0f;
-		const float EffectiveMagnitude = (Slot.CachedData.Magnitude + EvolutionBonus) * AffinityMult;
+		// NOTE: live magnitude now comes from FPassiveCardData.Levels (Phase 1); evolution
+		// scaling here is Phase-2 territory and intentionally inert until that pass.
+		const float BaseMag = Slot.CachedData.Levels.IsValidIndex(Slot.Level - 1) ? Slot.CachedData.Levels[Slot.Level - 1].Damage : 0.0f;
+		const float EffectiveMagnitude = (BaseMag + EvolutionBonus) * AffinityMult;
 
 		for (const FGameplayTag& Tag : Slot.CachedData.EffectTags)
 		{
-			TagMagnitudes.FindOrAdd(Tag) += EffectiveMagnitude; // Additive within same tag
+			TagMagnitudes.FindOrAdd(Tag) += EffectiveMagnitude;
 		}
 
-		// Cards That Remember: increment trigger count
 		Slot.TriggerCount++;
 		CheckEvolution(i);
 	}
 
 	if (TagMagnitudes.Num() == 0) return;
 
-	// Cross-type multiplier: multiplicative across different Effect tags
 	float CrossMultiplier = 1.0f;
+	for (const auto& Pair : TagMagnitudes) CrossMultiplier *= (1.0f + Pair.Value * 0.01f);
+
 	for (const auto& Pair : TagMagnitudes)
 	{
-		CrossMultiplier *= (1.0f + Pair.Value * 0.01f);
-	}
-
-	// Apply phase: broadcast each tag proc
-	for (const auto& Pair : TagMagnitudes)
-	{
-		const float FinalMagnitude = Pair.Value * CrossMultiplier;
-		OnPassiveProc.Broadcast(Pair.Key, FinalMagnitude);
-
-		UE_LOG(LogLoopedCards, VeryVerbose, TEXT("Passive proc: %s = %.2f (cross mult: %.2f)"),
-			*Pair.Key.ToString(), FinalMagnitude, CrossMultiplier);
+		OnPassiveProc.Broadcast(Pair.Key, Pair.Value * CrossMultiplier);
 	}
 }
 
@@ -148,8 +136,10 @@ float UPassiveStackComponent::GetAffinityMultiplier(const FPassiveCardData& Card
 
 void UPassiveStackComponent::CheckEvolution(int32 SlotIndex)
 {
-	FPassiveSlot& Slot = Slots[SlotIndex];
-	int32 OldTier = Slot.EvolutionTier;
+	TArray<FPassiveSlot>* Deck = GetDeck();
+	if (!Deck || !Deck->IsValidIndex(SlotIndex)) return;
+	FPassiveSlot& Slot = (*Deck)[SlotIndex];
+	const int32 OldTier = Slot.EvolutionTier;
 
 	if (Slot.TriggerCount >= Slot.CachedData.EvolutionTier2Threshold && Slot.EvolutionTier < 2)
 	{
@@ -163,7 +153,5 @@ void UPassiveStackComponent::CheckEvolution(int32 SlotIndex)
 	if (Slot.EvolutionTier != OldTier)
 	{
 		OnCardEvolved.Broadcast(SlotIndex, Slot.CardRowName, Slot.EvolutionTier);
-		UE_LOG(LogLoopedCards, Display, TEXT("Card '%s' evolved to tier %d (triggers: %d)"),
-			*Slot.CachedData.DisplayName.ToString(), Slot.EvolutionTier, Slot.TriggerCount);
 	}
 }

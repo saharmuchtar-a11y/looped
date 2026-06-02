@@ -133,16 +133,18 @@ void UWeaponHolderComponent::PerformMeleeAttack()
 
 			OnWeaponHit.Broadcast(Hit);
 
+			const float OutDamage = CachedWeaponData.BaseDamage * DamageMultiplier;
+
 			// Apply damage to enemy (check both types)
 			AEnemyBase* Enemy = Cast<AEnemyBase>(HitActor);
 			if (Enemy)
 			{
-				Enemy->TakeDamageFromPlayer(CachedWeaponData.BaseDamage, Owner);
+				Enemy->TakeDamageFromPlayer(OutDamage, Owner);
 			}
 			ASimpleEnemy* SimpleEnemy = Cast<ASimpleEnemy>(HitActor);
 			if (SimpleEnemy)
 			{
-				SimpleEnemy->TakeDamageFromPlayer(CachedWeaponData.BaseDamage, Owner);
+				SimpleEnemy->TakeDamageFromPlayer(OutDamage, Owner);
 			}
 
 			if (CachedPassiveStack)
@@ -151,7 +153,7 @@ void UWeaponHolderComponent::PerformMeleeAttack()
 			}
 
 			UE_LOG(LogLoopedWeapons, Display, TEXT("Melee hit: %s for %.1f damage"),
-				*HitActor->GetName(), CachedWeaponData.BaseDamage);
+				*HitActor->GetName(), OutDamage);
 		}
 	}
 }
@@ -179,10 +181,12 @@ void UWeaponHolderComponent::PerformHitscanAttack()
 
 		OnWeaponHit.Broadcast(Hit);
 
+		const float OutDamage = CachedWeaponData.BaseDamage * DamageMultiplier;
+
 		AEnemyBase* Enemy = Cast<AEnemyBase>(HitActor);
 		if (Enemy)
 		{
-			Enemy->TakeDamageFromPlayer(CachedWeaponData.BaseDamage, Owner);
+			Enemy->TakeDamageFromPlayer(OutDamage, Owner);
 		}
 
 		if (CachedPassiveStack)
@@ -191,6 +195,6 @@ void UWeaponHolderComponent::PerformHitscanAttack()
 		}
 
 		UE_LOG(LogLoopedWeapons, Display, TEXT("Hitscan hit: %s for %.1f damage"),
-			*HitActor->GetName(), CachedWeaponData.BaseDamage);
+			*HitActor->GetName(), OutDamage);
 	}
 }
