@@ -86,6 +86,11 @@ protected:
 	// World time when boss was spawned — used to compute kill duration for FastestBossKill stat.
 	float BossSpawnedAtSeconds = 0.0f;
 
+	// Creates the Souls-style boss HUD for TrackedBoss. Retries on a short timer if the
+	// PlayerController isn't ready yet (e.g. loading the boss map directly), so the bar reliably shows.
+	UFUNCTION()
+	void SetupBossHUD();
+
 	UFUNCTION()
 	void UpdateBossHUD();
 

@@ -52,30 +52,41 @@ void ALoopedRunGameMode::BeginPlay()
 	// the player is currently in. Drives the "Room X / N" HUD via GetCurrentRoom/GetTotalRooms.
 	if (ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
 	{
-		bool bCombatRoom = false;
+		bool bShowPlayerHUD = false;
 		if (!GI->IsInRunRoom())
 		{
 			// Hub / pre-run — no run room context.
 			GI->CurrentRunRoom = 0;
 			CurrentRoomIndex = 0;
 			TotalRoomsInFloor = GI->CurrentRunPath.Num();
+			// Loaded a level DIRECTLY (testing, no active run): still show the HP bar on any non-Hub
+			// arena so the player can see/lose health (e.g. testing the boss via direct load).
+			bShowPlayerHUD = !GetWorld()->GetMapName().Contains(TEXT("L_Hub"));
 		}
 		else
 		{
 			const FRoomNode Node = GI->GetCurrentRoomNode();
-			CurrentRoomIndex = Node.RoomIndex;            // 1-based path position
-			TotalRoomsInFloor = GI->CurrentRunPath.Num(); // total rooms in the run
-			GI->CurrentRunRoom = Node.RoomIndex;          // keep the legacy counter in sync
-			bCombatRoom = (Node.Type == ERoomType::Combat);
+			CurrentRoomIndex = Node.RoomIndex;                  // 1-based room number (forks grow this)
+			TotalRoomsInFloor = GI->RunLengthBeforeBoss + 1;    // planned run length incl. the boss
+			GI->CurrentRunRoom = Node.RoomIndex;                // keep the legacy counter in sync
+			// Show the player HP bar in combat AND boss rooms (the boss fight needs it too).
+			bShowPlayerHUD = (Node.Type == ERoomType::Combat || Node.Type == ERoomType::Boss);
 
 			// Fresh treasure room — reset the "N of X" pick budget so pedestals are pickable.
 			if (Node.Type == ERoomType::Treasure)
 			{
 				GI->ResetTreasurePicks();
 			}
+
+			// Non-combat run rooms (Treasure / Merchant) have no card draft to fire the exit fork,
+			// so reveal it on entry — the player grabs their relic / shops, then picks where to go.
+			if (Node.Type == ERoomType::Merchant || Node.Type == ERoomType::Treasure)
+			{
+				GI->ActivateRoomExitPortals();
+			}
 		}
 
-		if (bCombatRoom)
+		if (bShowPlayerHUD)
 		{
 			CreateRoomHUD();
 		}
@@ -93,9 +104,15 @@ void ALoopedRunGameMode::BeginPlay()
 
 void ALoopedRunGameMode::CreateRoomHUD()
 {
-	if (!RoomHUDClass) return;
+	if (!RoomHUDClass || RoomHUDWidget) return; // nothing to do / already built
 	APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
-	if (!PC) return;
+	if (!PC)
+	{
+		// Direct level load: the PlayerController can lag the GameMode a frame — retry instead of
+		// silently skipping the player HP bar (which made the boss feel "invincible").
+		GetWorldTimerManager().SetTimer(PlayerHUDTimerHandle, this, &ALoopedRunGameMode::CreateRoomHUD, 0.15f, false);
+		return;
+	}
 
 	RoomHUDWidget = CreateWidget<UUserWidget>(PC, RoomHUDClass);
 	if (!RoomHUDWidget) return;
@@ -175,16 +192,13 @@ void ALoopedRunGameMode::SpawnBossIfBossLevel()
 		return;
 	}
 
-	// FAILSAFE 2: no active run path (CurrentPathIndex == -1 via IsInRunRoom) means we are not
-	// inside a generated run room — there is no boss node to honor.
+	// Spawn the boss when EITHER the data-driven run node is a Boss room (normal full-run path) OR
+	// the level itself is the boss arena by name (so loading L_FinalBoss DIRECTLY for testing — with
+	// no active run state — still spawns the boss). The Hub failsafe above still blocks Hub spawns.
 	const ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>();
-	if (!GI || !GI->IsInRunRoom())
-	{
-		return;
-	}
-
-	// Data-driven: spawn the boss only when the CURRENT run node is a Boss room.
-	if (GI->GetCurrentRoomNode().Type != ERoomType::Boss)
+	const bool bBossByNode = GI && GI->IsInRunRoom() && GI->GetCurrentRoomNode().Type == ERoomType::Boss;
+	const bool bBossByName = World->GetMapName().Contains(TEXT("FinalBoss"));
+	if (!bBossByNode && !bBossByName)
 	{
 		return;
 	}
@@ -219,45 +233,60 @@ void ALoopedRunGameMode::SpawnBossIfBossLevel()
 			*SpawnLocation.ToCompactString(),
 			bUsedTargetPoint ? TEXT("from BossSpawn TargetPoint") : TEXT("default location"));
 
-		// Spawn the boss HUD only when there's actually a boss to track.
 		TrackedBoss = Boss;
-		if (BossHUDClass)
-		{
-			if (APlayerController* PC = World->GetFirstPlayerController())
-			{
-				BossHUDWidget = CreateWidget<UUserWidget>(PC, BossHUDClass);
-				if (BossHUDWidget)
-				{
-					BossHUDWidget->AddToViewport(100);
-
-					// Souls-style positioning: anchor bottom-center, ~130px above screen bottom.
-					// MCP set_property couldn't set canvas slot fields; doing it here at runtime.
-					if (UWidget* BarBox = BossHUDWidget->GetWidgetFromName(TEXT("BarBox")))
-					{
-						if (USizeBox* Box = Cast<USizeBox>(BarBox))
-						{
-							Box->SetWidthOverride(820.0f);
-							Box->SetHeightOverride(70.0f);
-						}
-						if (UCanvasPanelSlot* CPS = Cast<UCanvasPanelSlot>(BarBox->Slot))
-						{
-							CPS->SetAnchors(FAnchors(0.5f, 1.0f, 0.5f, 1.0f));
-							CPS->SetAlignment(FVector2D(0.5f, 1.0f));
-							CPS->SetOffsets(FMargin(0.0f, -130.0f, 820.0f, 70.0f));
-							CPS->SetSize(FVector2D(820.0f, 70.0f));
-						}
-					}
-
-					GetWorldTimerManager().SetTimer(BossHUDTimerHandle, this, &ALoopedRunGameMode::UpdateBossHUD, 0.05f, true);
-					Boss->OnEnemyDied.AddDynamic(this, &ALoopedRunGameMode::HandleBossDied);
-				}
-			}
-		}
+		// Bind death FIRST (independent of the HUD) so the hub portal always spawns on boss death,
+		// even if the HUD creation has to retry.
+		Boss->OnEnemyDied.AddDynamic(this, &ALoopedRunGameMode::HandleBossDied);
+		// Create the Souls bar (retries internally if the PlayerController isn't ready yet).
+		SetupBossHUD();
 	}
 	else
 	{
 		UE_LOG(LogLoopedRun, Warning, TEXT("Boss spawn FAILED at %s"), *SpawnLocation.ToCompactString());
 	}
+}
+
+void ALoopedRunGameMode::SetupBossHUD()
+{
+	if (!TrackedBoss || !BossHUDClass || BossHUDWidget)
+	{
+		return; // no boss, no class, or HUD already built
+	}
+
+	// On a direct level load the PlayerController can lag a frame or two behind the GameMode — without
+	// a PC there's no viewport to add to, so retry shortly instead of silently skipping the bar.
+	APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
+	if (!PC)
+	{
+		GetWorldTimerManager().SetTimer(BossHUDTimerHandle, this, &ALoopedRunGameMode::SetupBossHUD, 0.15f, false);
+		return;
+	}
+
+	BossHUDWidget = CreateWidget<UUserWidget>(PC, BossHUDClass);
+	if (!BossHUDWidget)
+	{
+		return;
+	}
+	BossHUDWidget->AddToViewport(100);
+
+	// Souls-style positioning: anchor bottom-center, ~130px above screen bottom.
+	if (UWidget* BarBox = BossHUDWidget->GetWidgetFromName(TEXT("BarBox")))
+	{
+		if (USizeBox* Box = Cast<USizeBox>(BarBox))
+		{
+			Box->SetWidthOverride(820.0f);
+			Box->SetHeightOverride(70.0f);
+		}
+		if (UCanvasPanelSlot* CPS = Cast<UCanvasPanelSlot>(BarBox->Slot))
+		{
+			CPS->SetAnchors(FAnchors(0.5f, 1.0f, 0.5f, 1.0f));
+			CPS->SetAlignment(FVector2D(0.5f, 1.0f));
+			CPS->SetOffsets(FMargin(0.0f, -130.0f, 820.0f, 70.0f));
+			CPS->SetSize(FVector2D(820.0f, 70.0f));
+		}
+	}
+
+	GetWorldTimerManager().SetTimer(BossHUDTimerHandle, this, &ALoopedRunGameMode::UpdateBossHUD, 0.05f, true);
 }
 
 void ALoopedRunGameMode::UpdateBossHUD()
@@ -266,7 +295,10 @@ void ALoopedRunGameMode::UpdateBossHUD()
 	{
 		return;
 	}
-	const float Cur = FMath::Max(0.0f, TrackedBoss->GetHealthPercent() * 300.0f);
+	// Data-driven: read the boss's real max HP so the numbers track whatever the boss is set to
+	// (per-boss POCHealth in BP), not a hardcoded 300.
+	const float MaxHP = FMath::Max(1.0f, TrackedBoss->GetMaxHealth());
+	const float Cur = FMath::Max(0.0f, TrackedBoss->GetHealthPercent() * MaxHP);
 	if (UProgressBar* Bar = Cast<UProgressBar>(BossHUDWidget->GetWidgetFromName(TEXT("HPBar"))))
 	{
 		Bar->SetPercent(TrackedBoss->GetHealthPercent());
@@ -274,7 +306,7 @@ void ALoopedRunGameMode::UpdateBossHUD()
 	if (UTextBlock* Nums = Cast<UTextBlock>(BossHUDWidget->GetWidgetFromName(TEXT("HPNumbers"))))
 	{
 		const int32 CurInt = FMath::RoundToInt(Cur);
-		const int32 MaxInt = 300; // Boss POCHealth default; refactor if multiple bosses ever ship
+		const int32 MaxInt = FMath::RoundToInt(MaxHP);
 		Nums->SetText(FText::FromString(FString::Printf(TEXT("%d / %d"), CurInt, MaxInt)));
 	}
 }

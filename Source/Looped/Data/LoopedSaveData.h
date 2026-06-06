@@ -42,6 +42,10 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")
 	float FastestBossKillSeconds = 0.0f;
 
+	// Best full-run time in seconds (run start -> run completed). 0 = no completed run yet.
+	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")
+	float FastestRunSeconds = 0.0f;
+
 	// --- Combat ---
 	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")
 	float TotalDamageDealt = 0.0f;

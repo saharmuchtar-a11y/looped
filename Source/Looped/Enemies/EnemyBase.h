@@ -47,6 +47,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "LOOPED|Enemy")
 	bool IsAlive() const;
 
+	// Cached max health (= POCHealth at spawn). Lets HUD/UI show the real max instead of a literal.
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Enemy")
+	float GetMaxHealth() const { return MaxHealthCached; }
+
 	UFUNCTION(BlueprintPure, Category = "LOOPED|Enemy")
 	bool IsBoss() const { return bIsBoss; }
 
@@ -81,10 +85,6 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UStaticMeshComponent> VisualMesh;
-
-	// Held rifle, socketed to the skeletal mesh hand. Shown only for ranged enemies (set in BeginPlay).
-	UPROPERTY(VisibleAnywhere, BlueprintReadWrite, Category = "Components")
-	TObjectPtr<UStaticMeshComponent> RifleMesh;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "POC")
 	float POCHealth = 100.0f;
@@ -127,6 +127,12 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Melee")
 	float LungeDuration = 0.20f;
 
+	// Hard cap on the lunge: the lunge drives STRAIGHT at the player until it makes
+	// contact OR this window closes, so a stationary target always gets reached
+	// instead of the enemy whiffing past it.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Melee")
+	float LungeMaxDuration = 0.6f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Melee")
 	float LungeSpeedMultiplier = 2.6f;
 
@@ -135,6 +141,16 @@ protected:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Melee")
 	float MeleeContactRange = 140.0f;
+
+	// Hybrid combat: a RANGED enemy/boss that ALSO melees (windup→lunge + attack anim) when the
+	// player gets close, instead of only kiting + shooting. Set true on bosses.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Melee")
+	bool bHybridMelee = false;
+
+	// Player distance (uu) at/under which a hybrid enemy commits to melee. It returns to ranged
+	// once the player backs beyond MeleeEngageRange * 1.6 (hysteresis stops twitchy flip-flop).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Melee")
+	float MeleeEngageRange = 260.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Melee")
 	FLinearColor WindupColor = FLinearColor(4.0f, 3.5f, 0.0f, 1.0f);  // super-bright yellow (HDR for emissive)
@@ -316,6 +332,11 @@ protected:
 	UPROPERTY(BlueprintReadOnly, Category = "State")
 	int32 FlankSlotIndex = 0;
 
+	// True only when the most recent lunge actually landed a hit. Recover backpedals
+	// after a connect (feels less zombie-like) but presses back IN after a whiff so
+	// a stationary player can't farm air-punches.
+	bool bLungeConnected = false;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UWidgetComponent> HPBarWidget;
 
@@ -324,8 +345,67 @@ private:
 	void BurnTick();
 	void VenomTick();
 
+	// Death sequence: Die() fires gameplay events immediately, then plays a death anim or ragdolls;
+	// FinishDeathHide() hides the corpse once that finishes. bIsDying guards against double-death.
+	bool bIsDying = false;
+	FTimerHandle DeathHideTimerHandle;
+	void FinishDeathHide();
+	// Plays a random DeathAnims entry as a DefaultSlot montage. Returns its play length, or 0 if none.
+	float PlayDeathAnim();
+	// Captured at BeginPlay so Respawn() can un-ragdoll the mesh back to its rig pose.
+	FTransform MeshDefaultRelativeTransform;
+
 	UPROPERTY()
 	TObjectPtr<UMaterialInstanceDynamic> DynMaterial;
+
+	// Base materials force-assigned in BeginPlay (by bIsRanged) so the dynamic instance ALWAYS has
+	// the BaseColor/EmissiveColor params RefreshColor drives — the color system can't silently break
+	// from a lost Blueprint material assignment again.
+	UPROPERTY()
+	TObjectPtr<UMaterialInterface> MeleeMaterial;
+
+	UPROPERTY()
+	TObjectPtr<UMaterialInterface> RangedMaterial;
+
+	// Glow OVERLAY driven on the VISIBLE skeletal mesh (CharacterMesh0). The old VisualMesh cube is
+	// invisible, so all color feedback (attack tells + red hit-flash) now renders via this additive
+	// overlay on top of the Manny mesh. Black = no glow (pure Manny).
+	UPROPERTY()
+	TObjectPtr<UMaterialInterface> OverlayBaseMaterial;
+
+	UPROPERTY()
+	TObjectPtr<UMaterialInstanceDynamic> OverlayMID;
+
+	// Combat SFX (loaded by path in the ctor; play at the enemy's location).
+	UPROPERTY()
+	TObjectPtr<class USoundBase> EnemyHurtSound;
+
+	UPROPERTY()
+	TObjectPtr<class USoundBase> RangedShotSound;
+
+	// Attack animations played (as a DefaultSlot montage) when the enemy winds up / fires. Editable
+	// per-enemy in the editor — point these at a swapped-in model's attack anims (Manny defaults).
+	UPROPERTY(EditAnywhere, Category = "LOOPED|Anim")
+	TArray<TObjectPtr<class UAnimSequence>> AttackAnims;
+
+	// Death animation(s). If set, one plays on death and the corpse is hidden after it finishes.
+	// If EMPTY, the enemy RAGDOLLS instead (asset-free) — drop in a model's death anim later to swap.
+	UPROPERTY(EditAnywhere, Category = "LOOPED|Anim")
+	TArray<TObjectPtr<class UAnimSequence>> DeathAnims;
+
+	// How long the corpse lingers before being hidden when there's no death anim (ragdoll path).
+	UPROPERTY(EditAnywhere, Category = "LOOPED|Anim")
+	float DeathHideFallbackDelay = 1.6f;
+
+	// Projectile element/class for this enemy's ranged shots (a DT_ProjectileElements RowName):
+	// drives the orb color + damage scaling. "None" = plain grey orb. Set per enemy class in editor.
+	UPROPERTY(EditAnywhere, Category = "LOOPED|Combat")
+	FName ProjectileElement = FName(TEXT("None"));
+
+	// Brief white "hit flash" when the enemy takes damage — clear "I connected" feedback.
+	FTimerHandle HitFlashTimerHandle;
+	bool bHitFlashing = false;
+	void EndHitFlash();
 
 	FTimerHandle BurnTimerHandle;
 	float BurnDamagePerTick = 0.0f;
@@ -334,8 +414,14 @@ private:
 	FTimerHandle MeleeTimerHandle;
 	FTimerHandle RangedTimerHandle;
 	bool bCanMeleeHit = true;
+	// Hybrid state: true while a hybrid ranged enemy is currently in its melee (close-range) mode.
+	bool bMeleeEngaged = false;
 	void MeleeCooldownReset();
 	void RangedAttack();
+
+	// Spawns one visible, dodgeable AEnemyProjectile aimed at the player (shared by normal ranged
+	// fire AND the boss Skyfall burst). Damage is passed in so the boss can scale it.
+	void SpawnProjectileAtPlayer(float Damage);
 
 	FTimerHandle VenomTimerHandle;
 	float VenomDamagePerTick = 0.0f;
@@ -355,9 +441,6 @@ private:
 	// Stuck detection
 	FVector LastStuckCheckLocation = FVector::ZeroVector;
 	float StuckTimer = 0.0f;
-
-	// Visual mesh base scale (captured at BeginPlay) so we can swell/shrink during windup.
-	FVector BaseMeshScale = FVector::OneVector;
 
 	// Kite strafe direction (-1 or +1)
 	float KiteStrafeSign = 1.0f;
@@ -383,6 +466,12 @@ private:
 	// Single source of truth — pick the right color/speed each frame based on stacked states
 	void RefreshColor();
 	void RefreshSpeed();
+
+	// Flash the enemy white briefly to register a player hit. Auto-reverts via RefreshColor.
+	void FlashHit();
+
+	// Play a random attack animation as a DefaultSlot montage on the skeletal mesh (windup / fire).
+	void PlayAttackAnim();
 
 	// Creative behaviors
 	FVector ComputeFlankPoint(const APawn* Player) const;

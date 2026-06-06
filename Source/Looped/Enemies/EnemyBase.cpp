@@ -6,6 +6,12 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Materials/MaterialInstanceDynamic.h"
+#include "Sound/SoundBase.h"
+#include "Animation/AnimSequence.h"
+#include "Animation/AnimInstance.h"
+#include "Enemies/EnemyProjectile.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Kismet/GameplayStatics.h"
 #include "TimerManager.h"
@@ -28,7 +34,9 @@ AEnemyBase::AEnemyBase()
 	VisualMesh->SetupAttachment(GetRootComponent());
 	VisualMesh->SetRelativeScale3D(FVector(0.8f, 0.8f, 1.8f));
 	VisualMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	VisualMesh->SetHiddenInGame(false);
+	// Invisible by design: the Manny skeletal mesh is the visible body; all color/flash tells render via
+	// the additive overlay on GetMesh(). This cube survives only as BossBase's melee-hit collision proxy.
+	VisualMesh->SetVisibility(false);
 
 	static ConstructorHelpers::FObjectFinder<UStaticMesh> CubeMesh(TEXT("StaticMesh'/Engine/BasicShapes/Cube.Cube'"));
 	if (CubeMesh.Succeeded())
@@ -36,20 +44,31 @@ AEnemyBase::AEnemyBase()
 		VisualMesh->SetStaticMesh(CubeMesh.Object);
 	}
 
-	// Held rifle — socketed to the hand bone so it follows the grip/aim animation.
-	// Hidden by default; BeginPlay shows it only when bIsRanged. Transform is a starting
-	// guess; fine-tune RifleMesh's relative transform in BP_RangedEnemy if the grip looks off.
-	RifleMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("RifleMesh"));
-	RifleMesh->SetupAttachment(GetMesh(), TEXT("hand_r"));
-	RifleMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	RifleMesh->SetRelativeLocation(FVector(-2.0f, 4.0f, 0.0f));
-	RifleMesh->SetRelativeRotation(FRotator(0.0f, -90.0f, 90.0f));
-	RifleMesh->SetVisibility(false);
-	static ConstructorHelpers::FObjectFinder<UStaticMesh> RifleSM(TEXT("/Game/Weapons/Rifle/Meshes/SM_Rifle.SM_Rifle"));
-	if (RifleSM.Succeeded())
-	{
-		RifleMesh->SetStaticMesh(RifleSM.Object);
-	}
+	// Cache the enemy materials so BeginPlay can force-assign one (by bIsRanged). Both expose the
+	// BaseColor/EmissiveColor params RefreshColor drives — assigning in C++ means the color system
+	// no longer depends on a (loseable) Blueprint material slot.
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> MeleeMat(TEXT("/Game/Materials/M_EnemyMelee.M_EnemyMelee"));
+	if (MeleeMat.Succeeded()) MeleeMaterial = MeleeMat.Object;
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> RangedMat(TEXT("/Game/Materials/M_EnemyRanged.M_EnemyRanged"));
+	if (RangedMat.Succeeded()) RangedMaterial = RangedMat.Object;
+
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> OverlayMat(TEXT("/Game/Materials/M_EnemyOverlay.M_EnemyOverlay"));
+	if (OverlayMat.Succeeded()) OverlayBaseMaterial = OverlayMat.Object;
+
+	static ConstructorHelpers::FObjectFinder<USoundBase> HurtSnd(TEXT("/Game/Audio/enemy_hurt.enemy_hurt"));
+	if (HurtSnd.Succeeded()) EnemyHurtSound = HurtSnd.Object;
+	static ConstructorHelpers::FObjectFinder<USoundBase> ShotSnd(TEXT("/Game/Audio/ranged_shot.ranged_shot"));
+	if (ShotSnd.Succeeded()) RangedShotSound = ShotSnd.Object;
+
+	// Default attack anims (Manny unarmed) — swappable per-enemy in the editor.
+	static ConstructorHelpers::FObjectFinder<UAnimSequence> Atk1(TEXT("/Game/Characters/Mannequins/Anims/Unarmed/Attack/MM_Attack_01.MM_Attack_01"));
+	if (Atk1.Succeeded()) AttackAnims.Add(Atk1.Object);
+	static ConstructorHelpers::FObjectFinder<UAnimSequence> Atk2(TEXT("/Game/Characters/Mannequins/Anims/Unarmed/Attack/MM_Attack_02.MM_Attack_02"));
+	if (Atk2.Succeeded()) AttackAnims.Add(Atk2.Object);
+	static ConstructorHelpers::FObjectFinder<UAnimSequence> Atk3(TEXT("/Game/Characters/Mannequins/Anims/Unarmed/Attack/MM_Attack_03.MM_Attack_03"));
+	if (Atk3.Succeeded()) AttackAnims.Add(Atk3.Object);
+
+	// (Rifle mesh removed — ranged enemies read clearly from posture; no held weapon needed.)
 
 	AutoPossessAI = EAutoPossessAI::PlacedInWorldOrSpawned;
 	AIControllerClass = AAIController::StaticClass();
@@ -80,15 +99,15 @@ void AEnemyBase::BeginPlay()
 	CurrentHealth = POCHealth;
 	MaxHealthCached = POCHealth;
 
-	// Only non-boss ranged enemies visibly carry the rifle. The boss sets bIsRanged=true
-	// for its volley attack but uses its own (melee-style) skeleton — no rifle.
-	if (RifleMesh)
-	{
-		RifleMesh->SetVisibility(bIsRanged && !bIsBoss);
-	}
-
 	if (VisualMesh)
 	{
+		// Force the correct base material (by ranged/melee) so the dynamic instance is GUARANTEED to
+		// have the BaseColor/EmissiveColor params — this is the fix for the broken color system.
+		if (UMaterialInterface* BaseMat = bIsRanged ? RangedMaterial : MeleeMaterial)
+		{
+			VisualMesh->SetMaterial(0, BaseMat);
+		}
+
 		DynMaterial = VisualMesh->CreateDynamicMaterialInstance(0);
 		if (DynMaterial)
 		{
@@ -96,10 +115,19 @@ void AEnemyBase::BeginPlay()
 			DynMaterial->SetVectorParameterValue(TEXT("EmissiveColor"), EnemyColor);
 			DynMaterial->SetVectorParameterValue(TEXT("BaseColor"), EnemyColor);
 		}
-		BaseMeshScale = VisualMesh->GetRelativeScale3D();
-		UE_LOG(LogLoopedAI, Display, TEXT("Enemy mesh: %s baseScale=%s"),
-			VisualMesh->GetStaticMesh() ? TEXT("loaded") : TEXT("MISSING"),
-			*BaseMeshScale.ToCompactString());
+	}
+
+	// Color feedback now renders via an additive OVERLAY on the visible skeletal mesh (the cube
+	// VisualMesh is invisible). Black overlay = pure Manny; tells + hit-flash glow over it.
+	if (USkeletalMeshComponent* SkMesh = GetMesh())
+	{
+		if (OverlayBaseMaterial)
+		{
+			OverlayMID = UMaterialInstanceDynamic::Create(OverlayBaseMaterial, this);
+			SkMesh->SetOverlayMaterial(OverlayMID);
+		}
+		// Remember the rig-pose transform so Respawn() can restore it after a ragdoll death.
+		MeshDefaultRelativeTransform = SkMesh->GetRelativeTransform();
 	}
 
 	BaseSpeed = MoveSpeed;
@@ -212,6 +240,28 @@ void AEnemyBase::Tick(float DeltaTime)
 
 	if (bIsRanged)
 	{
+		// Hybrid (e.g. boss): melee when the player is close, otherwise kite + shoot. Enter melee
+		// under MeleeEngageRange; only leave once a swing has finished (AIState back to Approach) AND
+		// the player has backed well out — hysteresis so it doesn't flip-flop on the boundary.
+		if (bHybridMelee)
+		{
+			const float DistToPlayer = FVector::Dist2D(Player->GetActorLocation(), GetActorLocation());
+			if (!bMeleeEngaged && DistToPlayer < MeleeEngageRange)
+			{
+				bMeleeEngaged = true;
+				EnterState(EEnemyAIState::Approach);
+			}
+			else if (bMeleeEngaged && AIState == EEnemyAIState::Approach && DistToPlayer > MeleeEngageRange * 1.6f)
+			{
+				bMeleeEngaged = false;
+				EnterState(EEnemyAIState::Kite);
+			}
+			if (bMeleeEngaged)
+			{
+				TickMelee(DeltaTime, Player);
+				return;
+			}
+		}
 		TickRanged(DeltaTime, Player);
 	}
 	else
@@ -234,9 +284,11 @@ void AEnemyBase::TickMelee(float DeltaTime, APawn* Player)
 		const FVector FlankPoint = ComputeFlankPoint(Player);
 		if (PathRefreshTimer <= 0.0f || !bHasNavTarget)
 		{
-			// If we're already close to the flank point, head straight at player; otherwise hit the flank slot first
+			// Once we're in the final approach band, beeline straight at the PLAYER instead of
+			// orbiting a flank point — otherwise a stationary target never gets closed on.
 			const float DistToFlank = FVector::Dist2D(FlankPoint, MyLoc);
-			const FVector Destination = (DistToFlank < 180.0f) ? PlayerLoc : FlankPoint;
+			const bool bFinalApproach = (Dist < LungeTriggerRange * 1.5f);
+			const FVector Destination = (bFinalApproach || DistToFlank < 180.0f) ? PlayerLoc : FlankPoint;
 			CurrentNavTarget = ComputeNavTarget(Destination);
 			bHasNavTarget = true;
 			PathRefreshTimer = PathRefreshInterval;
@@ -250,13 +302,9 @@ void AEnemyBase::TickMelee(float DeltaTime, APawn* Player)
 		if (Dist < LungeTriggerRange)
 		{
 			EnterState(EEnemyAIState::Windup);
+			PlayAttackAnim(); // visible melee wind-up swing
 			const float WindupMul = bIsFrenzied ? FrenzyWindupMultiplier : 1.0f;
 			StateTimer = WindupDuration * WindupMul;
-			// Visual swell — instant snap up, restored on Lunge entry.
-			if (VisualMesh)
-			{
-				VisualMesh->SetRelativeScale3D(BaseMeshScale * WindupScaleMultiplier);
-			}
 			RefreshColor();
 			UE_LOG(LogLoopedAI, Verbose, TEXT("Enemy WINDUP (frenzied=%d, dur=%.2f)"), bIsFrenzied ? 1 : 0, StateTimer);
 		}
@@ -269,12 +317,7 @@ void AEnemyBase::TickMelee(float DeltaTime, APawn* Player)
 		if (StateTimer <= 0.0f)
 		{
 			EnterState(EEnemyAIState::Lunge);
-			StateTimer = LungeDuration;
-			// Snap back to base scale before the lunge motion
-			if (VisualMesh)
-			{
-				VisualMesh->SetRelativeScale3D(BaseMeshScale);
-			}
+			StateTimer = LungeMaxDuration; // drive until contact, capped by this window
 			RefreshSpeed();
 			RefreshColor();
 		}
@@ -282,23 +325,29 @@ void AEnemyBase::TickMelee(float DeltaTime, APawn* Player)
 	}
 	case EEnemyAIState::Lunge:
 	{
+		// Drive STRAIGHT at the player for the whole lunge window
 		const FVector LungeDir = (PlayerLoc - MyLoc).GetSafeNormal2D();
 		AddMovementInput(LungeDir, 1.0f);
 		StateTimer -= DeltaTime;
 
 		// Apply contact damage if we make contact during the lunge
+		bool bHitThisLunge = false;
 		if (Dist < MeleeContactRange && bCanMeleeHit)
 		{
 			if (ALoopedCharacter* LC = Cast<ALoopedCharacter>(Player))
 			{
 				LC->TakeDamageFromEnemy(MeleeDamage);
 				bCanMeleeHit = false;
+				bHitThisLunge = true;
 				GetWorldTimerManager().SetTimer(MeleeTimerHandle, this, &AEnemyBase::MeleeCooldownReset, MeleeHitCooldown, false);
 			}
 		}
 
-		if (StateTimer <= 0.0f)
+		// End the lunge the instant we connect, or when the window closes — whichever comes
+		// first. Record the outcome so Recover knows whether to back off or press back in.
+		if (bHitThisLunge || StateTimer <= 0.0f)
 		{
+			bLungeConnected = bHitThisLunge;
 			EnterState(EEnemyAIState::Recover);
 			StateTimer = RecoverDuration;
 			RefreshSpeed();
@@ -309,9 +358,19 @@ void AEnemyBase::TickMelee(float DeltaTime, APawn* Player)
 	case EEnemyAIState::Recover:
 	{
 		StateTimer -= DeltaTime;
-		// Slight backpedal during recovery to feel less zombie-like
-		const FVector AwayDir = (MyLoc - PlayerLoc).GetSafeNormal2D();
-		AddMovementInput(AwayDir, 0.3f);
+		if (bLungeConnected)
+		{
+			// Landed the hit — slight backpedal so it feels less zombie-like.
+			const FVector AwayDir = (MyLoc - PlayerLoc).GetSafeNormal2D();
+			AddMovementInput(AwayDir, 0.3f);
+		}
+		else
+		{
+			// Whiffed — press back IN instead of backpedaling, so we don't lose ground
+			// against a stationary player and air-punch forever.
+			const FVector TowardDir = (PlayerLoc - MyLoc).GetSafeNormal2D();
+			AddMovementInput(TowardDir, 0.6f);
+		}
 		if (StateTimer <= 0.0f)
 		{
 			EnterState(EEnemyAIState::Approach);
@@ -421,10 +480,6 @@ void AEnemyBase::TickRanged(float DeltaTime, APawn* Player)
 		{
 			GetWorldTimerManager().ClearTimer(TelegraphTimerHandle);
 			bTelegraphInFlight = false;
-			if (VisualMesh)
-			{
-				VisualMesh->SetRelativeScale3D(BaseMeshScale);
-			}
 			RefreshColor();
 		}
 	}
@@ -501,40 +556,49 @@ void AEnemyBase::RestoreBaseColor()
 
 void AEnemyBase::RefreshColor()
 {
-	if (!DynMaterial) return;
-	FLinearColor C = EnemyColor;
+	// Drive the GLOW OVERLAY on the visible skeletal mesh. Additive material: BLACK = no glow (pure
+	// Manny), a color = that glow over the body. The old invisible cube (DynMaterial) is ignored.
+	if (!OverlayMID) return;
 
-	// Priority: TeleportWindup > SpecialWindup > Windup > Telegraph > Burn > Frenzy > Default.
-	// Combat tells MUST outrank passive moods so the player can always read the attack.
-	if (AIState == EEnemyAIState::TeleportWindup)
-	{
-		C = TeleportWindupColor;
-	}
-	else if (AIState == EEnemyAIState::SpecialWindup)
-	{
-		C = SpecialWindupColor;
-	}
-	else if (AIState == EEnemyAIState::Windup)
-	{
-		C = WindupColor;  // always yellow — even when frenzied
-	}
-	else if (bTelegraphInFlight)
-	{
-		C = TelegraphColor;
-	}
-	else if (BurnTicksRemaining > 0)
-	{
-		C = FLinearColor(1.0f, 0.35f, 0.0f, 1.0f);
-	}
-	else if (bIsFrenzied)
-	{
-		C = FrenzyColor;
-	}
+	// Default: no glow. Priority of tells: hit-flash > teleport > special > windup > telegraph >
+	// burn > frenzy. Hit-flash RED outranks everything so a player hit always reads.
+	FLinearColor Glow = FLinearColor::Black;
+	if (bHitFlashing)                                   Glow = FLinearColor(5.0f, 0.0f, 0.0f, 1.0f); // bright red hit
+	else if (AIState == EEnemyAIState::TeleportWindup)  Glow = TeleportWindupColor;
+	else if (AIState == EEnemyAIState::SpecialWindup)   Glow = SpecialWindupColor;
+	else if (AIState == EEnemyAIState::Windup)          Glow = WindupColor;
+	else if (bTelegraphInFlight)                        Glow = TelegraphColor;
+	else if (BurnTicksRemaining > 0)                    Glow = FLinearColor(1.5f, 0.45f, 0.0f, 1.0f);
+	else if (bIsFrenzied)                               Glow = FrenzyColor;
 
-	// Set every plausible param name so it works regardless of which one M_EnemyMelee exposes.
-	DynMaterial->SetVectorParameterValue(TEXT("Color"), C);
-	DynMaterial->SetVectorParameterValue(TEXT("EmissiveColor"), C);
-	DynMaterial->SetVectorParameterValue(TEXT("BaseColor"), C);
+	OverlayMID->SetVectorParameterValue(TEXT("OverlayColor"), Glow);
+}
+
+void AEnemyBase::FlashHit()
+{
+	if (!IsAlive()) return;
+	bHitFlashing = true;
+	RefreshColor();
+	GetWorldTimerManager().SetTimer(HitFlashTimerHandle, this, &AEnemyBase::EndHitFlash, 0.07f, false);
+}
+
+void AEnemyBase::EndHitFlash()
+{
+	bHitFlashing = false;
+	RefreshColor();
+}
+
+void AEnemyBase::PlayAttackAnim()
+{
+	if (AttackAnims.Num() == 0 || !GetMesh()) return;
+	UAnimInstance* AnimInst = GetMesh()->GetAnimInstance();
+	if (!AnimInst) return;
+	const int32 Pick = FMath::RandRange(0, AttackAnims.Num() - 1);
+	if (UAnimSequence* Seq = AttackAnims[Pick])
+	{
+		// Plays over locomotion via the AnimBP's DefaultSlot — the visible "winding up to attack" tell.
+		AnimInst->PlaySlotAnimationAsDynamicMontage(Seq, FName(TEXT("DefaultSlot")), 0.08f, 0.15f, 1.0f);
+	}
 }
 
 void AEnemyBase::RefreshSpeed()
@@ -576,6 +640,13 @@ void AEnemyBase::TakeDamageFromPlayer(float Damage, AActor* DamageSource)
 
 	const float OldHealth = CurrentHealth;
 	CurrentHealth = FMath::Max(0.0f, CurrentHealth - Damage);
+
+	// Visible + audible "I connected" feedback — red flash + hurt sound on every player hit.
+	FlashHit();
+	if (EnemyHurtSound)
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, EnemyHurtSound, GetActorLocation());
+	}
 
 	if (ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
 	{
@@ -626,17 +697,23 @@ bool AEnemyBase::IsAlive() const
 
 void AEnemyBase::Die()
 {
+	if (bIsDying) return; // guard: DeathPop / chain damage can re-enter on an already-dying enemy
+	bIsDying = true;
+
 	UE_LOG(LogLoopedAI, Display, TEXT("Enemy KILLED!"));
 
 	// Death pop: AoE damage to nearby allies before we go down
 	DeathPop();
 
+	// Fire gameplay events IMMEDIATELY so room-clear timing is driven by the kill, not the corpse anim.
 	OnEnemyDied.Broadcast(this);
 	BP_OnDied();
+	if (ALoopedRunGameMode* GM = Cast<ALoopedRunGameMode>(UGameplayStatics::GetGameMode(this)))
+	{
+		GM->NotifyAllEnemiesDefeated();
+	}
 
-	SetActorHiddenInGame(true);
-	SetActorEnableCollision(false);
-	if (HPBarWidget) HPBarWidget->SetVisibility(false);
+	// Stop all combat/AI activity.
 	GetWorldTimerManager().ClearTimer(RangedTimerHandle);
 	GetWorldTimerManager().ClearTimer(MeleeTimerHandle);
 	GetWorldTimerManager().ClearTimer(TelegraphTimerHandle);
@@ -648,11 +725,64 @@ void AEnemyBase::Die()
 	bTelegraphInFlight = false;
 	SpecialShotsRemaining = 0;
 	GetCharacterMovement()->DisableMovement();
+	if (HPBarWidget) HPBarWidget->SetVisibility(false);
 
-	if (ALoopedRunGameMode* GM = Cast<ALoopedRunGameMode>(UGameplayStatics::GetGameMode(this)))
+	// Stop EVERYTHING from blocking the player once dead, EXCEPT the ragdolling mesh: the capsule, the
+	// boss melee-proxy cube, AND any Blueprint-added collision (e.g. BP_TestEnemy's cube that otherwise
+	// keeps "standing" where the enemy died and walls the player off). The corpse mesh keeps physics
+	// but ignores Pawn (set in the ragdoll branch below) so the player walks through it.
 	{
-		GM->NotifyAllEnemiesDefeated();
+		TArray<UPrimitiveComponent*> Prims;
+		GetComponents<UPrimitiveComponent>(Prims);
+		for (UPrimitiveComponent* Prim : Prims)
+		{
+			if (Prim && Prim != GetMesh())
+			{
+				Prim->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			}
+		}
 	}
+
+	// Play a death anim if one is assigned; otherwise ragdoll the body (asset-free fallback).
+	float HideDelay = DeathHideFallbackDelay;
+	const float AnimLen = PlayDeathAnim();
+	if (AnimLen > 0.0f)
+	{
+		HideDelay = AnimLen;
+	}
+	else if (USkeletalMeshComponent* SkMesh = GetMesh())
+	{
+		SkMesh->SetCollisionProfileName(TEXT("Ragdoll"));
+		SkMesh->SetSimulatePhysics(true);
+		SkMesh->SetAllBodiesSimulatePhysics(true);
+		SkMesh->WakeAllRigidBodies();
+		// Corpse is visual only — it falls on the floor (WorldStatic) but the player walks straight
+		// through it. Ignoring Pawn stops the ragdoll from being a physical wall after a kill.
+		SkMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+	}
+
+	GetWorldTimerManager().SetTimer(DeathHideTimerHandle, this, &AEnemyBase::FinishDeathHide, FMath::Max(0.1f, HideDelay), false);
+}
+
+void AEnemyBase::FinishDeathHide()
+{
+	SetActorHiddenInGame(true);
+	SetActorEnableCollision(false);
+}
+
+float AEnemyBase::PlayDeathAnim()
+{
+	if (DeathAnims.Num() == 0 || !GetMesh()) return 0.0f;
+	UAnimInstance* AnimInst = GetMesh()->GetAnimInstance();
+	if (!AnimInst) return 0.0f;
+	const int32 Pick = FMath::RandRange(0, DeathAnims.Num() - 1);
+	if (UAnimSequence* Seq = DeathAnims[Pick])
+	{
+		// BlendOut 0 so the last (dead) pose holds until the corpse is hidden.
+		AnimInst->PlaySlotAnimationAsDynamicMontage(Seq, FName(TEXT("DefaultSlot")), 0.1f, 0.0f, 1.0f);
+		return Seq->GetPlayLength();
+	}
+	return 0.0f;
 }
 
 void AEnemyBase::Respawn()
@@ -678,19 +808,35 @@ void AEnemyBase::Respawn()
 	if (HPBarWidget) HPBarWidget->SetVisibility(true);
 	GetCharacterMovement()->SetMovementMode(EMovementMode::MOVE_Walking);
 
+	// Clear the dying flag + pending corpse-hide, and un-ragdoll the mesh back to its rig pose.
+	bIsDying = false;
+	GetWorldTimerManager().ClearTimer(DeathHideTimerHandle);
+	if (USkeletalMeshComponent* SkMesh = GetMesh())
+	{
+		if (SkMesh->IsSimulatingPhysics())
+		{
+			SkMesh->SetSimulatePhysics(false);
+			SkMesh->SetCollisionProfileName(TEXT("CharacterMesh"));
+			SkMesh->AttachToComponent(GetCapsuleComponent(), FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+			SkMesh->SetRelativeTransform(MeshDefaultRelativeTransform);
+		}
+	}
+	if (GetCapsuleComponent())
+	{
+		GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	}
+
 	// Reset AI state
 	AIState = bIsRanged ? EEnemyAIState::Kite : EEnemyAIState::Approach;
 	StateTimer = 0.0f;
 	PathRefreshTimer = 0.0f;
 	bHasNavTarget = false;
 	bCanMeleeHit = true;
+	bLungeConnected = false;
+	bMeleeEngaged = false;
 	bIsFrenzied = false;
 	bIsAlerted = false;
 	bTelegraphInFlight = false;
-	if (VisualMesh)
-	{
-		VisualMesh->SetRelativeScale3D(BaseMeshScale);
-	}
 
 	// Re-randomize flank slot so respawned waves spread differently
 	FlankSlotIndex = FMath::RandRange(0, FMath::Max(1, FlankSlotCount) - 1);
@@ -798,13 +944,34 @@ void AEnemyBase::RangedAttack()
 	APawn* Player = GetWorld()->GetFirstPlayerController()->GetPawn();
 	if (!Player) return;
 
-	// Require line of sight to actually land the hit
+	// Require line of sight to actually land the shot
 	if (!HasLineOfSightTo(Player)) return;
 
-	if (ALoopedCharacter* LC = Cast<ALoopedCharacter>(Player))
+	SpawnProjectileAtPlayer(RangedDamage);
+}
+
+void AEnemyBase::SpawnProjectileAtPlayer(float Damage)
+{
+	APawn* Player = GetWorld()->GetFirstPlayerController() ? GetWorld()->GetFirstPlayerController()->GetPawn() : nullptr;
+	if (!Player) return;
+
+	if (RangedShotSound)
 	{
-		LC->TakeDamageFromEnemy(RangedDamage);
-		UE_LOG(LogLoopedAI, Display, TEXT("Ranged enemy hit player for %.0f"), RangedDamage);
+		UGameplayStatics::PlaySoundAtLocation(this, RangedShotSound, GetActorLocation());
+	}
+
+	// Fire a VISIBLE, DODGEABLE projectile aimed at the player. It blocks on walls (cover matters)
+	// and only damages the player. Shared by normal ranged fire and the boss Skyfall burst.
+	const FVector Muzzle = GetActorLocation() + FVector(0.0f, 0.0f, 40.0f) + GetActorForwardVector() * 60.0f;
+	const FRotator AimRot = (Player->GetActorLocation() - Muzzle).Rotation();
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.Owner = this;
+	SpawnParams.Instigator = this;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	if (AEnemyProjectile* Proj = GetWorld()->SpawnActor<AEnemyProjectile>(AEnemyProjectile::StaticClass(), Muzzle, AimRot, SpawnParams))
+	{
+		Proj->Init(Damage, 1800.0f, ProjectileElement);
+		UE_LOG(LogLoopedAI, Display, TEXT("Enemy fired %s projectile (%.0f dmg)"), *ProjectileElement.ToString(), Damage);
 	}
 }
 
@@ -901,7 +1068,7 @@ void AEnemyBase::CheckEnterPhase2()
 
 	UE_LOG(LogLoopedAI, Display, TEXT("Boss entered PHASE 2 (HP%%=%.2f) — teleport unlocked, damage x%.1f, cooldowns tightened"),
 		GetHealthPercent(), Phase2DamageMultiplier);
-	GEngine->AddOnScreenDebugMessage(-1, 4.0f, FColor::Red, TEXT("[BOSS] PHASE 2 — WILD MODE"));
+	// [BOSS] PHASE 2 on-screen message removed for a clean screen (UE_LOG above kept for dev).
 }
 
 void AEnemyBase::BeginTeleport()
@@ -914,11 +1081,7 @@ void AEnemyBase::BeginTeleport()
 	bTelegraphInFlight = false;
 
 	AIState = EEnemyAIState::TeleportWindup;
-	// Inverse swell — boss CRUSHES inward then snaps to player. Distinct visual from outward charge.
-	if (VisualMesh)
-	{
-		VisualMesh->SetRelativeScale3D(BaseMeshScale * TeleportWindupScaleMultiplier);
-	}
+	// Tell is the pure-red TeleportWindup glow (distinct from the magenta Skyfall charge).
 	RefreshColor();
 	UE_LOG(LogLoopedAI, Display, TEXT("Boss: TELEPORT windup (%.2fs)"), TeleportWindupDuration);
 
@@ -927,10 +1090,6 @@ void AEnemyBase::BeginTeleport()
 
 void AEnemyBase::ExecuteTeleport()
 {
-	if (VisualMesh)
-	{
-		VisualMesh->SetRelativeScale3D(BaseMeshScale);
-	}
 	if (!IsAlive())
 	{
 		AIState = EEnemyAIState::Kite;
@@ -1024,10 +1183,8 @@ void AEnemyBase::BeginTelegraph()
 {
 	if (!IsAlive() || bTelegraphInFlight) return;
 	bTelegraphInFlight = true;
-	if (VisualMesh)
-	{
-		VisualMesh->SetRelativeScale3D(BaseMeshScale * TelegraphScaleMultiplier);
-	}
+	// NOTE: no melee swing here — ranged enemies get a proper fire/cast gesture in Fix #2 (with the
+	// projectile). For now the telegraph reads via the windup color tell.
 	RefreshColor();
 	UE_LOG(LogLoopedAI, Verbose, TEXT("Ranged TELEGRAPH begin (dur=%.2f)"), TelegraphDuration);
 	GetWorldTimerManager().SetTimer(TelegraphTimerHandle, this, &AEnemyBase::FireTelegraphedShot, TelegraphDuration, false);
@@ -1036,10 +1193,6 @@ void AEnemyBase::BeginTelegraph()
 void AEnemyBase::FireTelegraphedShot()
 {
 	bTelegraphInFlight = false;
-	if (VisualMesh)
-	{
-		VisualMesh->SetRelativeScale3D(BaseMeshScale);
-	}
 	if (!IsAlive())
 	{
 		RefreshColor();
@@ -1059,11 +1212,7 @@ void AEnemyBase::BeginSpecialAttack()
 	bTelegraphInFlight = false;
 
 	AIState = EEnemyAIState::SpecialWindup;
-	// Big visual swell — boss is CHARGING. 35% bigger reads as a clear "uh-oh" tell.
-	if (VisualMesh)
-	{
-		VisualMesh->SetRelativeScale3D(BaseMeshScale * SpecialWindupScaleMultiplier);
-	}
+	// Tell is the bright-magenta SpecialWindup glow — boss is CHARGING Skyfall.
 	RefreshColor();
 	UE_LOG(LogLoopedAI, Display, TEXT("Boss: SpecialWindup (will fire %d shots in %.2fs)"), SpecialBurstShots, SpecialWindupDuration);
 
@@ -1074,10 +1223,6 @@ void AEnemyBase::BeginSpecialAttack()
 void AEnemyBase::OnSpecialWindupFinished()
 {
 	// Snap mesh back to base scale — windup is done, the burst is about to fire.
-	if (VisualMesh)
-	{
-		VisualMesh->SetRelativeScale3D(BaseMeshScale);
-	}
 	if (!IsAlive())
 	{
 		AIState = bIsRanged ? EEnemyAIState::Kite : EEnemyAIState::Approach;
@@ -1107,12 +1252,11 @@ void AEnemyBase::FireSpecialBurstShot()
 	APawn* Player = PC ? PC->GetPawn() : nullptr;
 	if (Player && HasLineOfSightTo(Player))
 	{
-		if (ALoopedCharacter* LC = Cast<ALoopedCharacter>(Player))
-		{
-			const float Dmg = RangedDamage * FMath::Max(1.0f, SpecialDamageMultiplier);
-			LC->TakeDamageFromEnemy(Dmg);
-			UE_LOG(LogLoopedAI, Display, TEXT("Boss special burst hit player for %.0f (shot %d)"), Dmg, (SpecialBurstShots - SpecialShotsRemaining + 1));
-		}
+		// Skyfall now fires the SAME visible, dodgeable projectile as normal ranged fire (no more
+		// undodgeable hitscan) — scaled by SpecialDamageMultiplier. Cover + movement can beat it.
+		const float Dmg = RangedDamage * FMath::Max(1.0f, SpecialDamageMultiplier);
+		SpawnProjectileAtPlayer(Dmg);
+		UE_LOG(LogLoopedAI, Display, TEXT("Boss Skyfall fired projectile %.0f (shot %d)"), Dmg, (SpecialBurstShots - SpecialShotsRemaining + 1));
 	}
 
 	SpecialShotsRemaining = FMath::Max(0, SpecialShotsRemaining - 1);

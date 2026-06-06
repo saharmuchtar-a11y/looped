@@ -70,6 +70,8 @@ struct FWeaponData : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Visual")
 	FLinearColor FamilyColor = FLinearColor::White;
 
+	// Held weapon mesh shown in the hero's hand (data-driven). Static mesh = the natural type for a
+	// simple prop and what tools like Meshy export. Soft ptr → loaded on equip by the WeaponHolder.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Visual")
-	TSoftObjectPtr<USkeletalMesh> WeaponMesh;
+	TSoftObjectPtr<UStaticMesh> WeaponMesh;
 };

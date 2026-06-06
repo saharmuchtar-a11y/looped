@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
+#include "Engine/DataTable.h"
 #include "RoomRouting.generated.h"
 
 // Kind of room a node represents. Replaces string-based level detection (MapName.Contains).
@@ -22,6 +23,41 @@ enum class ERoomPool : uint8
 	EarlyCombat UMETA(DisplayName = "Early Combat"),
 	LateCombat  UMETA(DisplayName = "Late Combat"),
 	Treasure    UMETA(DisplayName = "Treasure")
+};
+
+// One row in DT_RoomTypes — a data-driven room TYPE the fork system can offer. Adding a new type
+// is just adding a row (same pattern as cards/curses). RowName = the type Id ("Combat", "Merchant").
+USTRUCT(BlueprintType)
+struct FRoomTypeData : public FTableRowBase
+{
+	GENERATED_BODY()
+
+	// Text shown on the portal's hovering sign ("Fight", "Merchant", "?").
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room Type")
+	FText DisplayLabel;
+
+	// Which legacy room behavior this type maps to (drives the GameMode: Combat = spawn room HUD,
+	// Treasure = reset pedestal picks, Boss = spawn boss). Lets the data-driven type stay compatible
+	// with the existing per-type room setup. e.g. Combat->Combat, Merchant->Merchant, Event->Treasure.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room Type")
+	ERoomType MappedType = ERoomType::Combat;
+
+	// Levels this type can load; the fork picks one at random (avoids back-to-back repeats).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room Type")
+	TArray<FName> LevelPool;
+
+	// Relative odds this type is offered in a fork. Equal weights = equal chance; raise/lower to make
+	// a type common or rare (e.g. a future "?" Event set low). 0 = effectively never offered.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room Type")
+	float Weight = 1.0f;
+
+	// If false, this type is never offered in a random fork (e.g. Boss / scripted-only types).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room Type")
+	bool bOfferableInForks = true;
+
+	// Tint for the portal's hovering sign text (Fight=red, ?=yellow, Merchant=teal, etc.).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room Type")
+	FLinearColor LabelColor = FLinearColor::White;
 };
 
 // One editable slot in the run's shape (the "recipe"). Resolves to one FRoomNode at

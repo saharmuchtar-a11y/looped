@@ -2,6 +2,7 @@
 #include "Looped.h"
 #include "Components/SphereComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/WidgetComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Blueprint/UserWidget.h"
 #include "Components/TextBlock.h"
@@ -11,11 +12,12 @@
 #include "Core/LoopedGameInstance.h"
 #include "Player/LoopedCharacter.h"
 #include "Kismet/GameplayStatics.h"
+#include "Sound/SoundBase.h"
 #include "UObject/ConstructorHelpers.h"
 
 AHubMerchant::AHubMerchant()
 {
-	PrimaryActorTick.bCanEverTick = false;
+	PrimaryActorTick.bCanEverTick = true; // Vorr turns to face the player
 
 	SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("SceneRoot"));
 	RootComponent = SceneRoot;
@@ -38,9 +40,42 @@ AHubMerchant::AHubMerchant()
 	Trigger->OnComponentBeginOverlap.AddDynamic(this, &AHubMerchant::OnTriggerBegin);
 	Trigger->OnComponentEndOverlap.AddDynamic(this, &AHubMerchant::OnTriggerEnd);
 
+	// Floating name tag above Vorr's head — screen-space so it always faces the camera (same as
+	// the treasure sign). WBP_NameTag already exists, so a ctor FClassFinder is safe here.
+	FloatingNameComp = CreateDefaultSubobject<UWidgetComponent>(TEXT("FloatingNameComp"));
+	FloatingNameComp->SetupAttachment(SceneRoot);
+	FloatingNameComp->SetRelativeLocation(FVector(0.0f, 0.0f, 240.0f)); // above the tall cylinder stall
+	FloatingNameComp->SetWidgetSpace(EWidgetSpace::Screen);
+	FloatingNameComp->SetDrawSize(FVector2D(300.0f, 80.0f));
+	FloatingNameComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	static ConstructorHelpers::FClassFinder<UUserWidget> NameTagClass(TEXT("/Game/UI/WBP_NameTag"));
+	if (NameTagClass.Succeeded())
+	{
+		FloatingNameComp->SetWidgetClass(NameTagClass.Class);
+	}
+
+	static ConstructorHelpers::FObjectFinder<USoundBase> BtnSnd(TEXT("/Game/Audio/button.button"));
+	if (BtnSnd.Succeeded()) ButtonSound = BtnSnd.Object;
+
 	// NOTE: the shop widget class is loaded at runtime in OpenShop() via LoadClass — NOT here.
 	// A constructor FClassFinder caches once at startup; if WBP_Merchant didn't exist yet it
 	// would cache null forever. Runtime LoadClass is robust to asset-creation order.
+}
+
+void AHubMerchant::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+	if (!bFacePlayer || !Mesh) return;
+
+	const APawn* Player = UGameplayStatics::GetPlayerPawn(this, 0);
+	if (!Player) return;
+
+	FVector ToPlayer = Player->GetActorLocation() - Mesh->GetComponentLocation();
+	ToPlayer.Z = 0.0f; // yaw only — keep Vorr upright
+	if (ToPlayer.IsNearlyZero()) return;
+
+	const float Yaw = ToPlayer.Rotation().Yaw + FaceYawOffset;
+	Mesh->SetWorldRotation(FRotator(0.0f, Yaw, 0.0f));
 }
 
 void AHubMerchant::BeginPlay()
@@ -287,6 +322,7 @@ void AHubMerchant::RefreshShop()
 
 void AHubMerchant::TryBuy(int32 SlotIndex)
 {
+	PlayButtonSound();
 	if (!Displayed.IsValidIndex(SlotIndex)) return;
 	ULoopedGameInstance* GI = Cast<ULoopedGameInstance>(GetGameInstance());
 	if (!GI) return;
@@ -369,10 +405,19 @@ void AHubMerchant::OnBuy1() { TryBuy(1); }
 void AHubMerchant::OnBuy2() { TryBuy(2); }
 void AHubMerchant::OnBuy3() { TryBuy(3); }
 void AHubMerchant::OnBuy4() { TryBuy(4); }
-void AHubMerchant::OnCloseClicked() { CloseShop(); }
+void AHubMerchant::PlayButtonSound()
+{
+	if (ButtonSound)
+	{
+		UGameplayStatics::PlaySound2D(this, ButtonSound);
+	}
+}
+
+void AHubMerchant::OnCloseClicked() { PlayButtonSound(); CloseShop(); }
 
 void AHubMerchant::OnToggleSection()
 {
+	PlayButtonSound();
 	// In the cache shop the section button is the REROLL button instead.
 	if (bInRunShop)
 	{

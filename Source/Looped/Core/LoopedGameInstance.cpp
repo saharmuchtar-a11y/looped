@@ -3,6 +3,8 @@
 #include "Data/LoopedSaveData.h"
 #include "Kismet/GameplayStatics.h"
 #include "Player/LoopedCharacter.h"
+#include "Core/PortalActor.h"
+#include "EngineUtils.h"
 
 static FName CanonCardId(FName Id); // defined below — folds "VenomStrike" alias onto "Venom"
 
@@ -25,6 +27,13 @@ void ULoopedGameInstance::Init()
 		UE_LOG(LogLoopedCore, Warning, TEXT("[Routing] DA_RunRouting not found at /Game/Data/DA_RunRouting — run path will be empty (routing falls back to Hub)."));
 	}
 
+	// Data-driven room TYPES for the choice-fork system (Step 2). Same load-by-path pattern.
+	RoomTypeTable = LoadObject<UDataTable>(nullptr, TEXT("/Game/Data/DT_RoomTypes.DT_RoomTypes"));
+	if (!RoomTypeTable)
+	{
+		UE_LOG(LogLoopedCore, Warning, TEXT("[Routing] DT_RoomTypes not found at /Game/Data/DT_RoomTypes — fork choices unavailable until it's created + populated."));
+	}
+
 	// Artifact/relic definitions — loaded by path, same pattern as the card table.
 	ArtifactTable = LoadObject<UDataTable>(nullptr, TEXT("/Game/Data/DT_Artifacts.DT_Artifacts"));
 	if (!ArtifactTable)
@@ -34,11 +43,7 @@ void ULoopedGameInstance::Init()
 
 	UE_LOG(LogLoopedCore, Display, TEXT("LoopedGameInstance initialized. Hunter Rank: %d"), HunterRank);
 #if !UE_BUILD_SHIPPING
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 6.0f, FColor::Magenta,
-			TEXT("[GameInstance] INIT — all perk levels start at 0"));
-	}
+	// [GameInstance] INIT on-screen message removed for a clean screen (UE_LOG above kept for dev).
 #endif
 }
 
@@ -112,6 +117,26 @@ void ULoopedGameInstance::AddRunCompleted()
 {
 	if (!Stats) return;
 	Stats->RunsCompleted++;
+
+	// Time the full run (run start -> now). RunStartRealTime is 0 if we somehow finished without a
+	// tracked start (e.g. direct-load testing) — skip timing in that case.
+	if (RunStartRealTime > 0.0)
+	{
+		const float RunSeconds = (float)(FPlatformTime::Seconds() - RunStartRealTime);
+		if (RunSeconds > 0.0f && (Stats->FastestRunSeconds <= 0.0f || RunSeconds < Stats->FastestRunSeconds))
+		{
+			Stats->FastestRunSeconds = RunSeconds;
+		}
+		// Speed-run reward: finish under the threshold -> unlock the Speed card.
+		if (RunSeconds > 0.0f && RunSeconds <= FastRunUnlockSeconds)
+		{
+			UE_LOG(LogLoopedCore, Display, TEXT("[Stats] Fast run %.1fs <= %.0fs -> unlocking Speed."), RunSeconds, FastRunUnlockSeconds);
+			UnlockCard(FName(TEXT("Speed")));
+		}
+		RunStartRealTime = 0.0; // consumed
+	}
+
+	EvaluateUnlocksAfterStatChange();
 	SaveStats();
 }
 
@@ -357,6 +382,7 @@ void ULoopedGameInstance::WipeSave()
 	Stats->RoomClears = 0;
 	Stats->TotalPlaytimeSeconds = 0.0f;
 	Stats->FastestBossKillSeconds = 0.0f;
+	Stats->FastestRunSeconds = 0.0f;
 	Stats->TotalDamageDealt = 0.0f;
 	Stats->TotalDamageTaken = 0.0f;
 	Stats->PerksPickedByName.Empty();
@@ -531,7 +557,7 @@ void ULoopedGameInstance::EvaluateUnlocksAfterStatChange()
 	TryUnlock(TEXT("ChainSpark"), Stats->BossKills  >= 5);   // 5 boss kills
 
 	// Epic cards.
-	TryUnlock(TEXT("Speed"),      Stats->RoomClears >= 30);
+	// Speed is unlocked ONLY by a fast run (see AddRunCompleted / FastRunUnlockSeconds) — Sahar's call.
 	// Gravity is NOT unlocked here — it's gated behind completing the Hub parkour
 	// (ACardUnlockTrigger at the summit calls UnlockCard("Gravity")).
 
@@ -603,14 +629,8 @@ int32 ULoopedGameInstance::IncrementPerkLevel(FName PerkName)
 	}
 
 	const int32 NewLevel = AddOrLevelCard(Id); // writes RunDeck — single source of truth
+	// Level-up kept in the log only — no on-screen print (keeps the player's screen pristine).
 	UE_LOG(LogLoopedCore, Display, TEXT("[GI] Card '%s' -> Lv %d / %d"), *Id.ToString(), NewLevel, Row->MaxLevel);
-#if !UE_BUILD_SHIPPING
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Magenta,
-			FString::Printf(TEXT("[GI] %s -> Lv %d"), *Id.ToString(), NewLevel));
-	}
-#endif
 
 	// First-time-ever MAX tracking (persistent) — now driven by the row's MaxLevel.
 	// Generic by id, so any future card is tracked. Gates secret unlocks (e.g. first max Gravity).
@@ -692,11 +712,25 @@ FText ULoopedGameInstance::GetPerkCardLabel(FName PerkName) const
 	const int32 Cap = Row->MaxLevel;
 	const FString Name = Row->DisplayName.IsEmpty() ? PerkName.ToString() : Row->DisplayName.ToString();
 
-	FString Result;
-	if (Current <= 0)        Result = FString::Printf(TEXT("%s — NEW (Lv 1/%d)"), *Name, Cap);
-	else if (Current >= Cap) Result = FString::Printf(TEXT("%s — MAX (Lv %d)"), *Name, Cap);
-	else                     Result = FString::Printf(TEXT("%s — Lv %d → %d / %d"), *Name, Current, Current + 1, Cap);
-	return FText::FromString(Result);
+	// Two-row label (no dash): row 1 = NAME [NEW/MAX], row 2 = (Lv x/n).
+	FString Top, Bottom;
+	if (Current <= 0)        { Top = FString::Printf(TEXT("%s NEW"), *Name); Bottom = FString::Printf(TEXT("(Lv 1/%d)"), Cap); }
+	else if (Current >= Cap) { Top = FString::Printf(TEXT("%s MAX"), *Name); Bottom = FString::Printf(TEXT("(Lv %d/%d)"), Cap, Cap); }
+	else                     { Top = Name;                                   Bottom = FString::Printf(TEXT("(Lv %d/%d)"), Current + 1, Cap); }
+	return FText::FromString(Top + TEXT("\n") + Bottom);
+}
+
+FText ULoopedGameInstance::GetCardDraftDescription(FName CardId) const
+{
+	const FPassiveCardData* Row = FindCardRow(CardId);
+	return Row ? Row->Description : FText::GetEmpty();
+}
+
+UTexture2D* ULoopedGameInstance::GetCardIcon(FName CardId) const
+{
+	const FPassiveCardData* Row = FindCardRow(CardId);
+	if (!Row || Row->CardIcon.IsNull()) return nullptr;
+	return Row->CardIcon.LoadSynchronous();
 }
 
 ECardRarity ULoopedGameInstance::GetPerkRarity(FName PerkName) const
@@ -867,14 +901,24 @@ void ULoopedGameInstance::GenerateRunPath()
 
 FName ULoopedGameInstance::BeginRunPath()
 {
-	if (CurrentRunPath.Num() == 0)
+	// Fork-based run: start fresh. The first room is always a Fight; every exit after is a 2-way
+	// choice (GenerateForkChoices). CurrentRunPath now records rooms as they're VISITED, not a
+	// pre-baked plan — so GetCurrentRoomNode()/IsInRunRoom() keep working for the GameMode.
+	CurrentRunPath.Reset();
+	CurrentPathIndex = -1;
+	RunRoomsEntered = 0;
+
+	// Stamp the run-start wall clock so AddRunCompleted can time the whole run (survives OpenLevel).
+	RunStartRealTime = FPlatformTime::Seconds();
+
+	const FName First = EnterRoomType(FName(TEXT("Combat")));
+	if (First.IsNone() || First == FName(TEXT("L_Hub")))
 	{
-		UE_LOG(LogLoopedCore, Warning, TEXT("[Routing] BeginRunPath with empty path — returning L_Hub."));
+		UE_LOG(LogLoopedCore, Warning, TEXT("[Routing] BeginRunPath: no 'Combat' room type / empty pool in DT_RoomTypes — falling back to Hub."));
 		CurrentPathIndex = -1;
 		return FName(TEXT("L_Hub"));
 	}
-	CurrentPathIndex = 0;
-	return CurrentRunPath[0].LevelName;
+	return First;
 }
 
 FName ULoopedGameInstance::AdvanceToNextRoom()
@@ -896,6 +940,122 @@ void ULoopedGameInstance::TravelToNextRoom(const UObject* WorldContextObject)
 	UE_LOG(LogLoopedCore, Display, TEXT("[Routing] TravelToNextRoom -> %s (idx %d / %d)."),
 		*Next.ToString(), CurrentPathIndex, CurrentRunPath.Num());
 	UGameplayStatics::OpenLevel(WorldContextObject ? WorldContextObject : this, Next);
+}
+
+void ULoopedGameInstance::ActivateRoomExitPortals()
+{
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	// The room's placed fork portals (start disabled; we only reveal the ones we assign a type to).
+	TArray<APortalActor*> Portals;
+	for (TActorIterator<APortalActor> It(World); It; ++It)
+	{
+		APortalActor* P = *It;
+		if (P && P->Mode == ERoutePortalMode::NextRoom) Portals.Add(P);
+	}
+	if (Portals.Num() == 0)
+	{
+		UE_LOG(LogLoopedCore, Warning, TEXT("[Routing] ActivateRoomExitPortals: no fork portals (Mode=NextRoom) in this room."));
+		return;
+	}
+
+	// Boss gate: once enough rooms are cleared, the only exit is the Boss (single portal).
+	if (IsBossNext())
+	{
+		Portals[0]->SetForkType(BossRoomTypeId); // reveals + labels; other portals stay hidden
+		UE_LOG(LogLoopedCore, Display, TEXT("[Routing] Boss gate (%d rooms) — boss portal revealed."), RunRoomsEntered);
+		return;
+	}
+
+	// Otherwise offer a choice: 2 distinct types (one per portal), each revealed + labelled.
+	const TArray<FName> Choices = GenerateForkChoices(Portals.Num());
+	for (int32 i = 0; i < Portals.Num(); ++i)
+	{
+		if (Choices.IsValidIndex(i))
+		{
+			Portals[i]->SetForkType(Choices[i]);
+		}
+		// Portals beyond the number of available choices simply stay disabled/hidden.
+	}
+	UE_LOG(LogLoopedCore, Display, TEXT("[Routing] Fork offered %d type(s) across %d portal(s)."), Choices.Num(), Portals.Num());
+}
+
+const FRoomTypeData* ULoopedGameInstance::FindRoomType(FName RoomTypeId) const
+{
+	if (!RoomTypeTable || RoomTypeId.IsNone()) return nullptr;
+	return RoomTypeTable->FindRow<FRoomTypeData>(RoomTypeId, TEXT("FindRoomType"), false);
+}
+
+TArray<FName> ULoopedGameInstance::GenerateForkChoices(int32 Count)
+{
+	TArray<FName> Result;
+	if (!RoomTypeTable) return Result;
+
+	// Build the candidate pool: fork-offerable rows with a usable level pool and positive weight.
+	TArray<FName> Pool;
+	TArray<float> Weights;
+	for (const FName& RowName : RoomTypeTable->GetRowNames())
+	{
+		const FRoomTypeData* Row = RoomTypeTable->FindRow<FRoomTypeData>(RowName, TEXT("GenerateForkChoices"), false);
+		if (Row && Row->bOfferableInForks && Row->Weight > 0.0f && Row->LevelPool.Num() > 0)
+		{
+			Pool.Add(RowName);
+			Weights.Add(Row->Weight);
+		}
+	}
+
+	// Weighted draw WITHOUT replacement — guarantees the one hard rule: never two of the same type.
+	while (Result.Num() < Count && Pool.Num() > 0)
+	{
+		float Total = 0.0f;
+		for (float W : Weights) Total += W;
+		float Roll = FMath::FRandRange(0.0f, Total);
+		int32 Pick = 0;
+		for (; Pick < Pool.Num() - 1; ++Pick)
+		{
+			Roll -= Weights[Pick];
+			if (Roll <= 0.0f) break;
+		}
+		Result.Add(Pool[Pick]);
+		Pool.RemoveAt(Pick);
+		Weights.RemoveAt(Pick);
+	}
+	return Result;
+}
+
+FName ULoopedGameInstance::EnterRoomType(FName RoomTypeId)
+{
+	const FRoomTypeData* Row = FindRoomType(RoomTypeId);
+	if (!Row || Row->LevelPool.Num() == 0)
+	{
+		UE_LOG(LogLoopedCore, Warning, TEXT("[Routing] EnterRoomType '%s' — missing row / empty pool. Returning Hub."), *RoomTypeId.ToString());
+		return FName(TEXT("L_Hub"));
+	}
+
+	// Pick a level from the type's pool, avoiding an immediate repeat of the current level.
+	const FName Prev = CurrentRunPath.IsValidIndex(CurrentPathIndex) ? CurrentRunPath[CurrentPathIndex].LevelName : NAME_None;
+	FName Level = Row->LevelPool[0];
+	if (Row->LevelPool.Num() > 1)
+	{
+		for (int32 Attempt = 0; Attempt < 8; ++Attempt)
+		{
+			Level = Row->LevelPool[FMath::RandRange(0, Row->LevelPool.Num() - 1)];
+			if (Level != Prev) break;
+		}
+	}
+
+	++RunRoomsEntered;
+	FRoomNode Node;
+	Node.LevelName = Level;
+	Node.Type = Row->MappedType;
+	Node.RoomIndex = RunRoomsEntered;
+	CurrentRunPath.Add(Node);
+	CurrentPathIndex = CurrentRunPath.Num() - 1;
+
+	UE_LOG(LogLoopedCore, Display, TEXT("[Routing] EnterRoomType '%s' -> %s (room %d, mappedtype %d)."),
+		*RoomTypeId.ToString(), *Level.ToString(), RunRoomsEntered, (int32)Row->MappedType);
+	return Level;
 }
 
 void ULoopedGameInstance::EndRunPath()
@@ -1174,10 +1334,6 @@ void ULoopedGameInstance::ResetPerks()
 	ClearRunDeck(); // new run — wipe the active build (single source of truth = RunDeck)
 	UE_LOG(LogLoopedCore, Display, TEXT("[GI] Run deck cleared (new run)"));
 #if !UE_BUILD_SHIPPING
-	if (GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 6.0f, FColor::Red,
-			TEXT("[GameInstance] PERKS WIPED — ResetPerks() called"));
-	}
+	// [GameInstance] PERKS WIPED on-screen message removed for a clean screen (UE_LOG above kept for dev).
 #endif
 }

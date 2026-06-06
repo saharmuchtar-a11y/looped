@@ -15,13 +15,22 @@ ABossBase::ABossBase()
 	bIsBoss = true;
 	bIsRanged = true;
 
-	POCHealth = 300.0f;
+	POCHealth = 1000.0f;
 	MoveSpeed = 400.0f;
 
 	MeleeDamage = 12.0f;
 	RangedDamage = 14.0f;
 	RangedFireRate = 1.6f;
 	RangedRange = 1800.0f;
+
+	// Hybrid: the boss melees (windup→lunge + attack anim, like a melee enemy) when the player closes
+	// in, and fires projectiles like a ranged enemy when they're far. The boss is spawned at 1.6x
+	// scale, so its body radius is much bigger than a mook's — the melee ranges are widened to match
+	// (otherwise lunges land "next to" the player and never register a hit).
+	bHybridMelee = true;
+	MeleeEngageRange = 480.0f;   // commit to melee at this player distance
+	LungeTriggerRange = 420.0f;  // wind up + lunge from here
+	MeleeContactRange = 230.0f;  // hit registers within here (boss capsule ~112 + player ~34 + margin)
 
 	// Phase 1 kite tuning — keep boss in player melee-reach range so the fight is winnable.
 	// Player branch weapon is ~200uu range and sprint covers ~900uu/s; these values let the

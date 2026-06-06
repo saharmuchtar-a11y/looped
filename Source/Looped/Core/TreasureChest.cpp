@@ -11,6 +11,8 @@
 #include "Data/ArtifactData.h"
 #include "Looped.h"
 #include "Engine/Engine.h"
+#include "Kismet/GameplayStatics.h"
+#include "Sound/SoundBase.h"
 #include "UObject/ConstructorHelpers.h"
 
 ATreasureChest::ATreasureChest()
@@ -48,6 +50,10 @@ ATreasureChest::ATreasureChest()
 	TriggerBox->SetBoxExtent(FVector(110.0f, 110.0f, 150.0f));
 	TriggerBox->SetCollisionProfileName(TEXT("Trigger"));
 	TriggerBox->OnComponentBeginOverlap.AddDynamic(this, &ATreasureChest::OnOverlapBegin);
+
+	// Shared UI button sound, played when the reward is taken (Sahar's request).
+	static ConstructorHelpers::FObjectFinder<USoundBase> ButtonSnd(TEXT("/Game/Audio/button.button"));
+	if (ButtonSnd.Succeeded()) PickupSound = ButtonSnd.Object;
 }
 
 void ATreasureChest::BeginPlay()
@@ -183,6 +189,10 @@ void ATreasureChest::AcceptPedestal()
 
 	bTaken = true;
 	GI->RegisterTreasurePick();
+	if (PickupSound)
+	{
+		UGameplayStatics::PlaySound2D(this, PickupSound);
+	}
 	OnPedestalTaken(RolledArtifactId);
 
 #if !UE_BUILD_SHIPPING

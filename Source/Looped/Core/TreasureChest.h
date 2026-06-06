@@ -85,4 +85,8 @@ private:
 	FName RolledArtifactId = NAME_None; // CleanRelic / CursedRelic
 	bool bTaken = false;
 	bool bLocked = false;
+
+	// Played when the player takes this pedestal's reward (the shared UI button sound). Loaded by path.
+	UPROPERTY()
+	TObjectPtr<class USoundBase> PickupSound;
 };

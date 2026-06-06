@@ -63,11 +63,26 @@ private:
 	void PerformMeleeAttack();
 	void PerformHitscanAttack();
 
+	// Loads CachedWeaponData.WeaponMesh and shows it on the owning hero's hand socket (none = hides it).
+	void ApplyWeaponVisual();
+
 	FName CurrentWeaponRowName = NAME_None;
 	FWeaponData CachedWeaponData;
 
 	bool bIsFiring = false;
 	FTimerHandle FireTimerHandle;
+
+	// Melee swing cadence gate: a swing is only allowed once AttackSpeed seconds have passed since
+	// the last one. This caps the branch's hits/sec so mashing the button can't out-DPS the design
+	// (the "click-fast-win" fix). Raise the weapon's AttackSpeed to make swings slower/heavier.
+	float LastMeleeTime = -1000.0f;
+
+	// Combat SFX (loaded by path in BeginPlay). Swoosh on every swing, impact on a connecting hit.
+	UPROPERTY()
+	TObjectPtr<class USoundBase> SwooshSound;
+
+	UPROPERTY()
+	TObjectPtr<class USoundBase> ImpactSound;
 
 	UPROPERTY()
 	TObjectPtr<UPassiveStackComponent> CachedPassiveStack;

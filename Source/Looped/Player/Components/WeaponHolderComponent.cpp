@@ -2,12 +2,22 @@
 #include "PassiveStackComponent.h"
 #include "Enemies/EnemyBase.h"
 #include "Enemies/SimpleEnemy.h"
+#include "Player/LoopedCharacter.h"
 #include "Looped.h"
 #include "Engine/World.h"
+#include "Kismet/GameplayStatics.h"
+#include "Sound/SoundBase.h"
+#include "Engine/StaticMesh.h"
+#include "UObject/ConstructorHelpers.h"
 
 UWeaponHolderComponent::UWeaponHolderComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
+
+	static ConstructorHelpers::FObjectFinder<USoundBase> SwooshSnd(TEXT("/Game/Audio/melee_swoosh.melee_swoosh"));
+	if (SwooshSnd.Succeeded()) SwooshSound = SwooshSnd.Object;
+	static ConstructorHelpers::FObjectFinder<USoundBase> ImpactSnd(TEXT("/Game/Audio/melee_impact.melee_impact"));
+	if (ImpactSnd.Succeeded()) ImpactSound = ImpactSnd.Object;
 }
 
 void UWeaponHolderComponent::BeginPlay()
@@ -18,20 +28,15 @@ void UWeaponHolderComponent::BeginPlay()
 
 	if (WeaponTable && StartingWeaponRowName != NAME_None)
 	{
-		EquipWeapon(StartingWeaponRowName);
+		EquipWeapon(StartingWeaponRowName); // applies the weapon visual too
 	}
 	else
 	{
-		// POC fallback: hardcoded Branch
-		CurrentWeaponRowName = FName("Branch");
-		CachedWeaponData.DisplayName = FText::FromString("Branch");
-		CachedWeaponData.PrimaryFamily = EWeaponFamily::Blade;
-		CachedWeaponData.HitType = EHitType::Melee;
-		CachedWeaponData.BaseDamage = 15.0f;
-		CachedWeaponData.AttackSpeed = 0.4f;
-		CachedWeaponData.Range = 3.0f;
-		CachedWeaponData.ScreenShakeMagnitude = 1.0f;
-		UE_LOG(LogLoopedWeapons, Display, TEXT("POC: Branch equipped with hardcoded stats"));
+		// No weapon table/row assigned — use the FWeaponData defaults (a basic melee weapon) so the
+		// player is never statless. Real weapons come from DT_Weapons; the old hardcoded-Branch POC
+		// fallback is gone (stats now live entirely in the DataTable).
+		UE_LOG(LogLoopedWeapons, Warning, TEXT("WeaponHolder: no WeaponTable/StartingWeaponRowName set — using default weapon stats."));
+		ApplyWeaponVisual();
 	}
 }
 
@@ -53,11 +58,25 @@ bool UWeaponHolderComponent::EquipWeapon(FName WeaponRowName)
 	CurrentWeaponRowName = WeaponRowName;
 	CachedWeaponData = *Data;
 
+	ApplyWeaponVisual();
+
 	OnWeaponChanged.Broadcast(WeaponRowName);
 	UE_LOG(LogLoopedWeapons, Display, TEXT("Equipped weapon: %s (%s family)"),
 		*Data->DisplayName.ToString(),
 		*UEnum::GetValueAsString(Data->PrimaryFamily));
 	return true;
+}
+
+void UWeaponHolderComponent::ApplyWeaponVisual()
+{
+	ALoopedCharacter* LC = Cast<ALoopedCharacter>(GetOwner());
+	if (!LC) return;
+
+	// Soft pointer → load on demand. Null/unset = clear the held weapon (hero shows unarmed).
+	UStaticMesh* Mesh = CachedWeaponData.WeaponMesh.IsNull()
+		? nullptr
+		: CachedWeaponData.WeaponMesh.LoadSynchronous();
+	LC->SetWeaponVisualMesh(Mesh);
 }
 
 const FWeaponData& UWeaponHolderComponent::GetCurrentWeaponData() const
@@ -73,6 +92,19 @@ EWeaponFamily UWeaponHolderComponent::GetCurrentFamily() const
 void UWeaponHolderComponent::StartFiring()
 {
 	bIsFiring = true;
+
+	// Melee swing cadence: ignore the input if we swung within AttackSpeed seconds. This caps the
+	// branch's hits/sec so spamming the button can't out-DPS the intended pace (click-fast-win fix).
+	if (CachedWeaponData.HitType == EHitType::Melee)
+	{
+		const float Now = GetWorld()->GetTimeSeconds();
+		if (Now - LastMeleeTime < FMath::Max(0.05f, CachedWeaponData.AttackSpeed))
+		{
+			return;
+		}
+		LastMeleeTime = Now;
+	}
+
 	FireWeapon();
 
 	if (CachedWeaponData.HitType != EHitType::Melee && CachedWeaponData.FireRate > 0.0f)
@@ -115,6 +147,12 @@ void UWeaponHolderComponent::PerformMeleeAttack()
 	APlayerController* PC = Cast<APlayerController>(Cast<APawn>(Owner)->GetController());
 	if (!PC || !PC->PlayerCameraManager) return;
 
+	// Whoosh on every swing (hit or miss) — sells the attack.
+	if (SwooshSound)
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, SwooshSound, Owner->GetActorLocation());
+	}
+
 	FVector Start = PC->PlayerCameraManager->GetCameraLocation();
 	FVector Forward = PC->PlayerCameraManager->GetCameraRotation().Vector();
 	FVector End = Start + Forward * CachedWeaponData.Range * 100.0f;
@@ -124,6 +162,7 @@ void UWeaponHolderComponent::PerformMeleeAttack()
 	FCollisionQueryParams Params;
 	Params.AddIgnoredActor(Owner);
 
+	bool bConnected = false;
 	if (GetWorld()->SweepMultiByChannel(Hits, Start, End, FQuat::Identity, ECC_Pawn, Shape, Params))
 	{
 		for (const FHitResult& Hit : Hits)
@@ -140,11 +179,13 @@ void UWeaponHolderComponent::PerformMeleeAttack()
 			if (Enemy)
 			{
 				Enemy->TakeDamageFromPlayer(OutDamage, Owner);
+				bConnected = true;
 			}
 			ASimpleEnemy* SimpleEnemy = Cast<ASimpleEnemy>(HitActor);
 			if (SimpleEnemy)
 			{
 				SimpleEnemy->TakeDamageFromPlayer(OutDamage, Owner);
+				bConnected = true;
 			}
 
 			if (CachedPassiveStack)
@@ -154,6 +195,16 @@ void UWeaponHolderComponent::PerformMeleeAttack()
 
 			UE_LOG(LogLoopedWeapons, Display, TEXT("Melee hit: %s for %.1f damage"),
 				*HitActor->GetName(), OutDamage);
+		}
+	}
+
+	// Impact feedback ONCE per swing that connected: thunk sound. (No camera shake on landing a hit —
+	// the enemy's red hit-flash already reads the connect clearly. Shake is kept for TAKING damage.)
+	if (bConnected)
+	{
+		if (ImpactSound)
+		{
+			UGameplayStatics::PlaySoundAtLocation(this, ImpactSound, Owner->GetActorLocation());
 		}
 	}
 }

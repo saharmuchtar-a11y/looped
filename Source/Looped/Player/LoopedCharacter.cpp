@@ -20,12 +20,20 @@
 #include "TimerManager.h"
 #include "Components/TextBlock.h"
 #include "Components/CanvasPanelSlot.h"
+#include "Components/PanelWidget.h"
+#include "Components/VerticalBoxSlot.h"
 #include "Components/WidgetComponent.h"
 #include "GameFramework/PlayerController.h"
+#include "Camera/PlayerCameraManager.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Components/CapsuleComponent.h"
 #include "Engine/StaticMesh.h"
+#include "Engine/SkeletalMesh.h"
 #include "Animation/AnimSequence.h"
 #include "Animation/AnimInstance.h"
+#include "Kismet/GameplayStatics.h"
+#include "Sound/SoundBase.h"
 
 ALoopedCharacter::ALoopedCharacter()
 {
@@ -50,6 +58,13 @@ ALoopedCharacter::ALoopedCharacter()
 	GetCharacterMovement()->NavAgentProps.bCanCrouch = true;
 	GetCharacterMovement()->CrouchedHalfHeight = 44.0f;
 
+	// Player-hurt SFX — loaded by path (plays when damage lands).
+	static ConstructorHelpers::FObjectFinder<USoundBase> HurtSnd(TEXT("/Game/Audio/player_hurt.player_hurt"));
+	if (HurtSnd.Succeeded()) PlayerHurtSound = HurtSnd.Object;
+
+	static ConstructorHelpers::FObjectFinder<USoundBase> JumpSnd(TEXT("/Game/Audio/jump.jump"));
+	if (JumpSnd.Succeeded()) JumpSound = JumpSnd.Object;
+
 	// Death screen widget class — loaded from WBP_DeathScreen via path.
 	static ConstructorHelpers::FClassFinder<UUserWidget> DeathScreenClassFinder(TEXT("/Game/UI/WBP_DeathScreen"));
 	if (DeathScreenClassFinder.Succeeded())
@@ -57,15 +72,13 @@ ALoopedCharacter::ALoopedCharacter()
 		DeathScreenClass = DeathScreenClassFinder.Class;
 	}
 
-	// Tree-branch melee weapon attached to right hand bone on the Manny mannequin.
-	WeaponBranchMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("WeaponBranchMesh"));
-	WeaponBranchMesh->SetupAttachment(GetMesh(), TEXT("hand_r"));
-	WeaponBranchMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	static ConstructorHelpers::FObjectFinder<UStaticMesh> BranchMeshFinder(TEXT("/Game/SM_TreeBranch"));
-	if (BranchMeshFinder.Succeeded())
-	{
-		WeaponBranchMesh->SetStaticMesh(BranchMeshFinder.Object);
-	}
+	// Held-weapon mesh, attached to the hero hand socket. Starts empty/hidden — the WeaponHolder
+	// drives which mesh shows from the equipped FWeaponData (data-driven; no baked-in component).
+	WeaponMeshComp = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("WeaponMesh"));
+	WeaponMeshComp->SetupAttachment(GetMesh(), WeaponAttachSocket);
+	WeaponMeshComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	WeaponMeshComp->SetVisibility(false);
+	WeaponMeshComp->SetCastShadow(false);
 
 	// Pre-load Manny unarmed attack anims so PlayRandomAttackAnim has something to pick from.
 	static ConstructorHelpers::FObjectFinder<UAnimSequence> Atk1(TEXT("/Game/Characters/Mannequins/Anims/Unarmed/Attack/MM_Attack_01"));
@@ -110,9 +123,38 @@ void ALoopedCharacter::PlayRandomAttackAnim()
 	}
 }
 
+void ALoopedCharacter::SetWeaponVisualMesh(UStaticMesh* NewMesh)
+{
+	if (!WeaponMeshComp) return;
+	// Re-assert the socket attachment in case the socket name changed in defaults after construction.
+	if (WeaponMeshComp->GetAttachSocketName() != WeaponAttachSocket)
+	{
+		WeaponMeshComp->AttachToComponent(GetMesh(), FAttachmentTransformRules::SnapToTargetNotIncludingScale, WeaponAttachSocket);
+	}
+	WeaponMeshComp->SetStaticMesh(NewMesh);
+	WeaponMeshComp->SetVisibility(NewMesh != nullptr);
+}
+
 void ALoopedCharacter::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// Cache the camera's rest position so the positional shake can jitter around it + snap back.
+	if (FirstPersonCamera)
+	{
+		BaseCameraRelLoc = FirstPersonCamera->GetRelativeLocation();
+	}
+
+	// Fade in from black on every level load. Paired with APortalActor's fade-out before travel,
+	// this masks the one-time synchronous OpenLevel hitch so the transition reads as a smooth fade
+	// instead of a freeze — no loading screen. StartCameraFade(1->0) snaps black, then clears.
+	if (APlayerController* PC = Cast<APlayerController>(GetController()))
+	{
+		if (PC->PlayerCameraManager)
+		{
+			PC->PlayerCameraManager->StartCameraFade(1.0f, 0.0f, 0.45f, FLinearColor::Black, false, false);
+		}
+	}
 
 	// Set up Enhanced Input
 	if (APlayerController* PC = Cast<APlayerController>(GetController()))
@@ -332,6 +374,12 @@ void ALoopedCharacter::TakeDamageFromEnemy(float Damage)
 	if (POCCurrentHealth <= 0.0f) return;
 	if (bHologramOpen) return; // invulnerable while the arm monitor is open (paused-menu feel)
 
+	if (PlayerHurtSound)
+	{
+		UGameplayStatics::PlaySound2D(this, PlayerHurtSound);
+	}
+	AddCameraShake(1.2f); // small screen punch when you get hit (no-freeze damage feedback)
+
 	// Curse "Frailty": you take more damage this run.
 	if (const ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
 	{
@@ -368,15 +416,85 @@ void ALoopedCharacter::TakeDamageFromEnemy(float Damage)
 			GI->StartDeathScreen();
 		}
 		UE_LOG(LogLoopedCore, Display, TEXT("Player DIED!"));
-#if !UE_BUILD_SHIPPING
-		GEngine->AddOnScreenDebugMessage(-1, 4.0f, FColor::Red, TEXT("[Player] DEATH PATH FIRED"));
-#endif
 		ShowDeathScreenIfActive();
-		// Broadcast immediately so the BP can trigger OpenLevel("L_Hub") right away.
-		// The death screen persists because the new world's LoopedCharacter::BeginPlay re-creates it
-		// from the GameInstance flag for the remaining duration.
-		OnPlayerDied.Broadcast();
+		// Death cam: ragdoll the body + pull the camera to a 3rd-person shot of the hero on the floor.
+		EnterDeathCam();
+		// Hold the shot, THEN travel. OnPlayerDied (which the BP uses to OpenLevel→Hub) is delayed by
+		// DeathCamDuration so the "back to square one" moment actually reads. The death screen persists
+		// into the Hub via the GameInstance flag for whatever time remains.
+		GetWorldTimerManager().SetTimer(DeathTravelTimerHandle, this, &ALoopedCharacter::FinishDeathAndTravel, FMath::Max(0.1f, DeathCamDuration), false);
 	}
+}
+
+void ALoopedCharacter::EnterDeathCam()
+{
+	// Freeze the player: no input, no movement.
+	if (APlayerController* PC = Cast<APlayerController>(GetController()))
+	{
+		DisableInput(PC);
+	}
+	if (UCharacterMovementComponent* Move = GetCharacterMovement())
+	{
+		Move->StopMovementImmediately();
+		Move->DisableMovement();
+	}
+
+	// Ragdoll the hero so the body crumples to the floor (same approach as enemies). Make sure the
+	// body is visible to its owner (FP setups often hide it) and doesn't block via the capsule.
+	if (USkeletalMeshComponent* M = GetMesh())
+	{
+		M->SetOwnerNoSee(false);
+		M->SetCollisionProfileName(TEXT("Ragdoll"));
+		M->SetSimulatePhysics(true);
+		M->SetAllBodiesSimulatePhysics(true);
+		M->WakeAllRigidBodies();
+		M->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+	}
+	if (UCapsuleComponent* Cap = GetCapsuleComponent())
+	{
+		Cap->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	}
+
+	// Detach the FP camera, lift it straight UP over the body and aim DOWN at it (top-down death shot).
+	// Overhead can't clip the side walls; a small back offset gives a touch of angle, and a vertical
+	// sweep drops the camera below any low ceiling so it never ends up inside geometry.
+	if (FirstPersonCamera)
+	{
+		const FVector HeroLoc = GetActorLocation();
+		const FVector Pivot   = HeroLoc + FVector(0.0f, 0.0f, 40.0f);
+		// High 3/4 angle: well up AND pulled back so the shot has elevation + perspective (not a flat
+		// straight-down "just the floor" view). The sweep keeps it out of walls/ceilings.
+		FVector CamLoc = HeroLoc + (-GetActorForwardVector()) * 300.0f + FVector(0.0f, 0.0f, 430.0f);
+
+		FHitResult Hit;
+		FCollisionQueryParams Params(FName(TEXT("DeathCam")), false, this);
+		Params.AddIgnoredActor(this);
+		if (GetWorld()->SweepSingleByChannel(Hit, Pivot, CamLoc, FQuat::Identity,
+			ECC_WorldStatic, FCollisionShape::MakeSphere(22.0f), Params))
+		{
+			CamLoc = Hit.Location - (CamLoc - Pivot).GetSafeNormal() * 20.0f;
+		}
+
+		FirstPersonCamera->bUsePawnControlRotation = false;
+		FirstPersonCamera->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
+
+		// Glide from the current first-person view to the death shot (Tick interpolates) — no snap.
+		DeathCamStartLoc = FirstPersonCamera->GetComponentLocation();
+		DeathCamStartRot = FirstPersonCamera->GetComponentRotation();
+		DeathCamTargetLoc = CamLoc;
+		DeathCamTargetRot = (HeroLoc - CamLoc).Rotation();
+		DeathCamMoveElapsed = 0.0f;
+		bDeathCamMoving = true;
+		bInDeathCam = true;
+	}
+}
+
+void ALoopedCharacter::FinishDeathAndTravel()
+{
+	// Notify listeners (stats, etc.), then travel. The BP's HandleDeath no longer OpenLevels on death
+	// (that immediate travel was removed so the death cam can hold) — C++ owns the delayed travel now.
+	OnPlayerDied.Broadcast();
+	UGameplayStatics::OpenLevel(this, FName(TEXT("L_Hub")));
 }
 
 void ALoopedCharacter::ShowDeathScreenIfActive()
@@ -501,6 +619,48 @@ void ALoopedCharacter::OpenHologramForReward()
 	OpenHologram(/*bRewardMode*/ true);
 }
 
+void ALoopedCharacter::MountCardWidgetInMonitor(UUserWidget* CardWidget)
+{
+	if (!CardWidget) return;
+
+	// Make sure the monitor is up in reward mode (this also shows CenterPanel).
+	if (!bHologramOpen)
+	{
+		OpenHologram(/*bRewardMode*/ true);
+	}
+	if (!WristMenuWidget) return;
+
+	if (UWidget* Center = WristMenuWidget->GetWidgetFromName(TEXT("CenterPanel")))
+	{
+		Center->SetVisibility(ESlateVisibility::Visible);
+	}
+	// Hide the dummy placeholder so only the real cards show.
+	if (UWidget* Placeholder = WristMenuWidget->GetWidgetFromName(TEXT("CenterPlaceholder")))
+	{
+		Placeholder->SetVisibility(ESlateVisibility::Collapsed);
+	}
+
+	// Drop the card widget into the CenterPanel (a VerticalBox) and let it fill the slot so the
+	// card row sits centered inside the monitor and scales with the layout.
+	if (UPanelWidget* Center = Cast<UPanelWidget>(WristMenuWidget->GetWidgetFromName(TEXT("CenterPanel"))))
+	{
+		if (UPanelSlot* Added = Center->AddChild(CardWidget))
+		{
+			if (UVerticalBoxSlot* VSlot = Cast<UVerticalBoxSlot>(Added))
+			{
+				FSlateChildSize FillSize;
+				FillSize.SizeRule = ESlateSizeRule::Fill;
+				FillSize.Value = 1.0f;
+				VSlot->SetSize(FillSize);
+				VSlot->SetHorizontalAlignment(HAlign_Fill);
+				VSlot->SetVerticalAlignment(VAlign_Fill);
+			}
+		}
+	}
+
+	RefreshDashboard();
+}
+
 void ALoopedCharacter::OpenHologram(bool bRewardMode)
 {
 	bHologramOpen = true;
@@ -590,10 +750,9 @@ void ALoopedCharacter::RefreshDashboard()
 	SetText(TEXT("ShardsText"), FString::Printf(TEXT("Shards: %d"), GI->GetShards()));
 	SetText(TEXT("EchoesText"), FString::Printf(TEXT("Echoes: %d"), GI->GetEchoes()));
 
-	// Left: build stats
-	SetText(TEXT("MaxHPText"), FString::Printf(TEXT("Max HP: %.0f"), POCMaxHealth));
-	const float Speed = GetCharacterMovement() ? GetCharacterMovement()->MaxWalkSpeed : 0.0f;
-	SetText(TEXT("MoveSpeedText"), FString::Printf(TEXT("Move Speed: %.0f"), Speed));
+	// Bottom-right: permanent artifacts (moved into the monitor; the old floating HUD is retired).
+	const FString Artifacts = GI->GetOwnedArtifactsLabel().ToString();
+	SetText(TEXT("ArtifactsText"), Artifacts.IsEmpty() ? FString(TEXT("(none)")) : Artifacts);
 
 	FString Perks;
 	for (const FPassiveSlot& Slot : GI->RunDeck)
@@ -620,9 +779,62 @@ void ALoopedCharacter::RefreshDashboard()
 	SetText(TEXT("CursesText"), Curses.IsEmpty() ? FString(TEXT("(none)")) : Curses);
 }
 
+void ALoopedCharacter::AddCameraShake(float Intensity)
+{
+	// Take the max so overlapping shakes don't stack into a violent jolt — keeps it tight + crisp.
+	CameraShakeAmount = FMath::Max(CameraShakeAmount, Intensity);
+}
+
+void ALoopedCharacter::OnJumped_Implementation()
+{
+	Super::OnJumped_Implementation();
+	if (JumpSound)
+	{
+		UGameplayStatics::PlaySound2D(this, JumpSound);
+	}
+}
+
 void ALoopedCharacter::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+
+	// Death cam: glide the (detached) camera from the FP view up/away to the overhead death shot,
+	// then hold. While dead we skip the rest of Tick (shake/decay/etc) so nothing disturbs the shot.
+	if (bInDeathCam)
+	{
+		if (bDeathCamMoving && FirstPersonCamera)
+		{
+			DeathCamMoveElapsed += DeltaSeconds;
+			const float A = FMath::Clamp(DeathCamMoveElapsed / FMath::Max(0.01f, DeathCamMoveDuration), 0.0f, 1.0f);
+			const float E = A * A * (3.0f - 2.0f * A); // smoothstep ease in/out
+			const FVector L = FMath::Lerp(DeathCamStartLoc, DeathCamTargetLoc, E);
+			const FQuat Q = FQuat::Slerp(DeathCamStartRot.Quaternion(), DeathCamTargetRot.Quaternion(), E);
+			FirstPersonCamera->SetWorldLocationAndRotation(L, Q);
+			if (A >= 1.0f) bDeathCamMoving = false;
+		}
+		return;
+	}
+
+	// Positional camera shake (no-freeze impact punch). Jitter the camera's relative location and
+	// decay the amount; snap back to base when spent. Uses unscaled delta so it's unaffected by slow-mo.
+	if (FirstPersonCamera)
+	{
+		if (CameraShakeAmount > KINDA_SMALL_NUMBER)
+		{
+			const float Mag = CameraShakeAmount * 4.0f; // units of jitter per unit intensity
+			const FVector Jitter(
+				FMath::FRandRange(-Mag, Mag),
+				FMath::FRandRange(-Mag, Mag),
+				FMath::FRandRange(-Mag, Mag));
+			FirstPersonCamera->SetRelativeLocation(BaseCameraRelLoc + Jitter);
+			CameraShakeAmount = FMath::FInterpTo(CameraShakeAmount, 0.0f, DeltaSeconds, 12.0f);
+		}
+		else if (!FirstPersonCamera->GetRelativeLocation().Equals(BaseCameraRelLoc, 0.01f))
+		{
+			FirstPersonCamera->SetRelativeLocation(BaseCameraRelLoc);
+			CameraShakeAmount = 0.0f;
+		}
+	}
 
 	if (ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
 	{
@@ -652,60 +864,9 @@ void ALoopedCharacter::Tick(float DeltaSeconds)
 		}
 	}
 
-#if !UE_BUILD_SHIPPING
-	// Persistent perk-level + target-enemy HUD pinned via AddOnScreenDebugMessage.
-	// Fixed Keys mean each line replaces itself per frame instead of accumulating.
-	if (GEngine)
-	{
-		const ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>();
-		// Build-stats overlay (Echoes / Shards / Curses / Deck) removed — that info now lives in
-			// the arm monitor (Middle-Mouse). Clear any stale pinned lines from the old overlay.
-			GEngine->RemoveOnScreenDebugMessage(3000);
-			GEngine->RemoveOnScreenDebugMessage(3009);
-			GEngine->RemoveOnScreenDebugMessage(3008);
-			GEngine->RemoveOnScreenDebugMessage(3001);
-			for (int32 K = 3010; K <= 3016; ++K) GEngine->RemoveOnScreenDebugMessage(K);
-
-		// Targeted-enemy HP — line trace from the first-person camera forward.
-		// Shows whoever the crosshair is on, refreshed per frame so it appears/disappears live.
-		AEnemyBase* TargetEnemy = nullptr;
-		if (FirstPersonCamera)
-		{
-			const FVector Start = FirstPersonCamera->GetComponentLocation();
-			const FVector End   = Start + FirstPersonCamera->GetForwardVector() * 3000.0f;
-			FHitResult Hit;
-			FCollisionQueryParams Params(SCENE_QUERY_STAT(PlayerTargetTrace), false, this);
-			Params.AddIgnoredActor(this);
-			if (GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params))
-			{
-				TargetEnemy = Cast<AEnemyBase>(Hit.GetActor());
-			}
-		}
-
-		// Curse "Dimmed": hide enemy HP info — drop the target so the readout clears.
-		if (TargetEnemy && GI && GI->HasCurse(TEXT("Dimmed")))
-		{
-			TargetEnemy = nullptr;
-		}
-
-		if (TargetEnemy && TargetEnemy->IsAlive())
-		{
-			const float HpPct = TargetEnemy->GetHealthPercent() * 100.0f;
-			const FString Tag = TargetEnemy->IsBoss() ? TEXT("BOSS") : TEXT("Enemy");
-			GEngine->AddOnScreenDebugMessage(3050, 0.15f, FColor::White,  TEXT(""));
-			GEngine->AddOnScreenDebugMessage(3051, 0.15f, FColor::White,  TEXT("TARGET"));
-			GEngine->AddOnScreenDebugMessage(3052, 0.15f, FColor::Red,
-				FString::Printf(TEXT("  %s   %.0f%%"), *Tag, HpPct));
-		}
-		else
-		{
-			// Clear stale target lines if we lost the trace
-			GEngine->RemoveOnScreenDebugMessage(3050);
-			GEngine->RemoveOnScreenDebugMessage(3051);
-			GEngine->RemoveOnScreenDebugMessage(3052);
-		}
-	}
-#endif
+	// Top-left "TARGET / Enemy X%" debug overlay removed for a clean screen — enemy HP now reads
+	// only from the world-space WBP_EnemyHP bar above each enemy. (Old build-stats overlay already
+	// moved to the arm monitor.) Function kept minimal; nothing pinned to the screen here anymore.
 }
 
 // --- Perk system ---
@@ -749,13 +910,8 @@ int32 ALoopedCharacter::IncrementPerkLevel(FName PerkName)
 	const int32 NewLevel = GI->IncrementPerkLevel(PerkName);
 	GI->RecordPerkPicked(PerkName, NewLevel);
 
-#if !UE_BUILD_SHIPPING
-	if (GEngine)
-	{
-		const FString Msg = FString::Printf(TEXT("Picked: %s  Lv %d"), *PerkName.ToString(), NewLevel);
-		GEngine->AddOnScreenDebugMessage(-1, 4.0f, FColor::Yellow, Msg);
-	}
-#endif
+	// Dev visibility kept in the log only — no on-screen print (keeps the player's screen pristine).
+	UE_LOG(LogLoopedCore, Verbose, TEXT("[Player] Picked: %s Lv %d"), *PerkName.ToString(), NewLevel);
 
 	// Movement perks apply passively
 	if (PerkName == TEXT("Speed") || PerkName == TEXT("Gravity"))
@@ -895,28 +1051,11 @@ void ALoopedCharacter::OnPlayerHitEnemy(AEnemyBase* Enemy)
 
 void ALoopedCharacter::UpdateArtifactHUD()
 {
-	ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>();
-	if (!GI) return;
-
-	APlayerController* PC = Cast<APlayerController>(GetController());
-	if (!PC && GetWorld()) PC = GetWorld()->GetFirstPlayerController();
-	if (!PC) return;
-
-	if (!ArtifactHUDWidget)
+	// Artifacts now live in the wrist monitor (ARTIFACTS corner), not a separate always-on HUD.
+	// Just refresh the monitor if it's currently open; otherwise it'll pick up the latest on next open.
+	if (bHologramOpen)
 	{
-		TSubclassOf<UUserWidget> Cls = LoadClass<UUserWidget>(nullptr, TEXT("/Game/UI/WBP_ArtifactsHUD.WBP_ArtifactsHUD_C"));
-		if (!Cls) return;
-		ArtifactHUDWidget = CreateWidget<UUserWidget>(PC, Cls);
-		if (ArtifactHUDWidget) ArtifactHUDWidget->AddToViewport(40);
-	}
-	if (!ArtifactHUDWidget) return;
-
-	const FText Label = GI->GetOwnedArtifactsLabel();
-	const bool bHasAny = !Label.IsEmpty();
-	ArtifactHUDWidget->SetVisibility(bHasAny ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
-	if (UTextBlock* T = Cast<UTextBlock>(ArtifactHUDWidget->GetWidgetFromName(TEXT("ArtifactsText"))))
-	{
-		T->SetText(Label);
+		RefreshDashboard();
 	}
 }
 
@@ -986,12 +1125,19 @@ void ALoopedCharacter::ShowCenterMessage(const FText& Message, float Duration)
 	}
 	Msg->AddToViewport(200);
 
+	// Stack vertically: each concurrent message sits a row below the previous one.
+	const int32 Slot = ActiveCenterMessageCount;
+	ActiveCenterMessageCount++;
+	Msg->SetRenderTranslation(FVector2D(0.0f, (float)Slot * 52.0f));
+
 	// Transient — auto-remove after Duration (matches the parkour/unlock message pattern).
 	TWeakObjectPtr<UUserWidget> WeakMsg(Msg);
+	TWeakObjectPtr<ALoopedCharacter> WeakThis(this);
 	FTimerHandle TH;
-	GetWorldTimerManager().SetTimer(TH, FTimerDelegate::CreateLambda([WeakMsg]()
+	GetWorldTimerManager().SetTimer(TH, FTimerDelegate::CreateLambda([WeakMsg, WeakThis]()
 	{
 		if (WeakMsg.IsValid()) WeakMsg->RemoveFromParent();
+		if (WeakThis.IsValid()) WeakThis->ActiveCenterMessageCount = FMath::Max(0, WeakThis->ActiveCenterMessageCount - 1);
 	}), Duration, false);
 }
 

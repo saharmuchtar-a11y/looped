@@ -60,6 +60,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|Stats")
 	void AddRunCompleted();
 
+	// Finishing a run faster than this (seconds) unlocks the Speed card. Tunable.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Stats")
+	float FastRunUnlockSeconds = 120.0f;
+
+	// Wall-clock stamp (FPlatformTime::Seconds) of when the current run started. Survives OpenLevel
+	// (the GI persists across travel). Run-scoped, not saved. 0 = no run in progress.
+	double RunStartRealTime = 0.0;
+
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|Stats")
 	void AddPlaytime(float Seconds);
 
@@ -332,6 +340,15 @@ public:
 	UFUNCTION(BlueprintPure, Category = "LOOPED|Cards")
 	FText GetCardDescriptionForLevel(FName CardId, int32 Level) const;
 
+	// Short "what this card does" blurb for the card-draft UI — the row's generic Description.
+	// Level-agnostic on purpose (the draft shows what the card is, not the per-level delta).
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Cards")
+	FText GetCardDraftDescription(FName CardId) const;
+
+	// The card's frame/art texture (DT row CardIcon, loaded). Null if unset. Drives the card-draft art.
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Cards")
+	class UTexture2D* GetCardIcon(FName CardId) const;
+
 	// "Current: X  ->  Upgrade: Y" preview for upgrading from CurrentLevel. Returns "MAX LEVEL"
 	// when already capped. CurrentLevel 0 = not yet owned (previews Level 1 as the upgrade).
 	UFUNCTION(BlueprintPure, Category = "LOOPED|Cards")
@@ -385,6 +402,44 @@ public:
 	// (replaces its Open Level node) so the path index and the level load can never desync.
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|Run", meta = (WorldContext = "WorldContextObject"))
 	void TravelToNextRoom(const UObject* WorldContextObject);
+
+	// Reveals + configures the room's exit portals (the choice fork). Called by BP_CardRewardManager
+	// after the card draft (combat rooms) and by the GameMode on entering a non-combat run room.
+	// Picks 2 distinct room types from DT_RoomTypes and assigns one to each placed fork portal — or,
+	// once RunRoomsEntered has hit RunLengthBeforeBoss, configures a single Boss portal instead.
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Run")
+	void ActivateRoomExitPortals();
+
+	// --- Choice forks (Step 2): data-driven room types from DT_RoomTypes -------------------------
+	// Pick `Count` DISTINCT, fork-offerable room types, weighted by each row's Weight. Never repeats
+	// a type within the result (the one hard rule). Returns the chosen type RowNames.
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Run")
+	TArray<FName> GenerateForkChoices(int32 Count = 2);
+
+	// Enter a room of the given type: draws a random level from that type's pool (no back-to-back
+	// repeat), appends a FRoomNode (with the row's MappedType) to CurrentRunPath, advances the index
+	// and the rooms-entered counter, and returns the level name for the portal to OpenLevel.
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Run")
+	FName EnterRoomType(FName RoomTypeId);
+
+	// True once the player has cleared enough rooms that the next exit must be the Boss.
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Run")
+	bool IsBossNext() const { return RunRoomsEntered >= RunLengthBeforeBoss; }
+
+	// Look up a row in DT_RoomTypes (nullptr if missing / table unset).
+	const struct FRoomTypeData* FindRoomType(FName RoomTypeId) const;
+
+	// Non-boss rooms entered before the Boss is forced (Sahar: 9 rooms, boss is #10).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Run")
+	int32 RunLengthBeforeBoss = 9;
+
+	// Rooms entered this run (1 at the first room from BeginRunPath, ++ each fork). Gates the boss.
+	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Run")
+	int32 RunRoomsEntered = 0;
+
+	// RowName of the type to force as the boss exit (non-offerable row in DT_RoomTypes).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Run")
+	FName BossRoomTypeId = FName(TEXT("Boss"));
 
 	// Ends the active run path (CurrentPathIndex = -1) so the NEXT level loaded is treated as the
 	// Hub / pre-run. Called the moment a run ends (boss clear / death / win) — the Hub's
@@ -483,6 +538,11 @@ private:
 	// Run routing config (pools + run layout), loaded by path in Init(). Drives GenerateRunPath().
 	UPROPERTY()
 	TObjectPtr<URunRoutingConfig> RoutingConfig;
+
+	// Data-driven room TYPES (DT_RoomTypes, rows = FRoomTypeData), loaded by path in Init(). Source
+	// for the 2-portal choice forks (Step 2). Adding a room type = add a row — no code change.
+	UPROPERTY()
+	TObjectPtr<UDataTable> RoomTypeTable;
 
 	// Artifact/relic definition table, loaded by path in Init(). Single source of artifact data.
 	UPROPERTY()

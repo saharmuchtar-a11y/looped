@@ -6,6 +6,7 @@
 
 class USphereComponent;
 class UStaticMeshComponent;
+class UWidgetComponent;
 class UUserWidget;
 class APlayerController;
 
@@ -41,6 +42,15 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+	virtual void Tick(float DeltaSeconds) override;
+
+	// Vorr rotates (yaw only) to face the player every frame.
+	UPROPERTY(EditAnywhere, Category = "Merchant")
+	bool bFacePlayer = true;
+
+	// Degrees to add so the model's front lines up with the player (tune per model).
+	UPROPERTY(EditAnywhere, Category = "Merchant")
+	float FaceYawOffset = 0.0f;
 
 	UPROPERTY(VisibleAnywhere, Category = "Merchant")
 	TObjectPtr<USceneComponent> SceneRoot;
@@ -50,6 +60,11 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, Category = "Merchant")
 	TObjectPtr<USphereComponent> Trigger;
+
+	// Floating "Vorr" name tag above the merchant (screen-space, always faces camera) — same
+	// pattern as the treasure chest's sign.
+	UPROPERTY(VisibleAnywhere, Category = "Merchant")
+	TObjectPtr<UWidgetComponent> FloatingNameComp;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Merchant")
 	float TriggerRadius = 260.0f;
@@ -146,4 +161,10 @@ protected:
 	TObjectPtr<APlayerController> CurrentPC;
 
 	bool bShopOpen = false;
+
+	// Shop button-click SFX (loaded by path in the ctor; played on buy / toggle / close clicks).
+	UPROPERTY()
+	TObjectPtr<class USoundBase> ButtonSound;
+
+	void PlayButtonSound();
 };

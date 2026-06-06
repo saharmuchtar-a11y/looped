@@ -15,6 +15,7 @@ class UInputAction;
 class UInputMappingContext;
 class AEnemyBase;
 class UStaticMeshComponent;
+class UStaticMesh;
 class UAnimSequence;
 class UWidgetComponent;
 
@@ -70,6 +71,16 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|UI")
 	float DeathScreenDuration = 2.5f;
 
+	// Death cam: how long the 3rd-person "you're dead on the floor" shot holds before traveling to
+	// the Hub. The OnPlayerDied broadcast (which the BP uses to OpenLevel) is delayed by this.
+	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|UI")
+	float DeathCamDuration = 2.6f;
+
+	// How long the camera takes to glide from the first-person view up/away to the death shot
+	// (instead of snapping). Should be < DeathCamDuration.
+	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|UI")
+	float DeathCamMoveDuration = 0.8f;
+
 	// --- Perk mirror ints + tuning caps REMOVED (data consolidation). Levels live in the
 	//     GameInstance RunDeck; per-level values + caps come from the FPassiveCardData rows. ---
 
@@ -121,6 +132,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|UI")
 	void OpenHologramForReward();
 
+	// Mount the card-draft widget INSIDE the monitor's CenterPanel (instead of a separate
+	// centered viewport overlay), so the cards live in this layout and scale with it. Opens the
+	// monitor in reward mode if needed, hides the center placeholder, and fills the panel slot.
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|UI")
+	void MountCardWidgetInMonitor(class UUserWidget* CardWidget);
+
 	// Close the monitor: hide it, restore 1.0 time, re-lock the cursor to game.
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|UI")
 	void CloseHologram();
@@ -150,18 +167,52 @@ protected:
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
 	virtual void SetupPlayerInputComponent(UInputComponent* PlayerInputComponent) override;
+	virtual void OnJumped_Implementation() override; // plays the jump SFX
 
 	// Components
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UCameraComponent> FirstPersonCamera;
 
-	// Tree-branch melee weapon visible in the mannequin's right hand. Attached to hand_r socket.
+	// Visible held weapon, attached to the hero hand socket. The mesh itself is data-driven —
+	// the WeaponHolder applies FWeaponData.WeaponMesh on equip (none = hidden). Replaces the old
+	// hardcoded POC branch hand-mesh.
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
-	TObjectPtr<UStaticMeshComponent> WeaponBranchMesh;
+	TObjectPtr<UStaticMeshComponent> WeaponMeshComp;
+
+	// Socket/bone on the hero mesh the weapon attaches to. Default = Manny right hand bone.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Weapon")
+	FName WeaponAttachSocket = FName("hand_r");
+
+public:
+	// Show/clear the held weapon mesh. Called by the WeaponHolder on equip (nullptr hides it).
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Weapon")
+	void SetWeaponVisualMesh(UStaticMesh* NewMesh);
+
+protected:
+
+
 
 	// Unarmed attack anims (Manny). Picked randomly on fire.
 	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|Anim")
 	TArray<TObjectPtr<UAnimSequence>> AttackAnims;
+
+	// Played when the player takes damage (loaded by path in the ctor).
+	UPROPERTY()
+	TObjectPtr<class USoundBase> PlayerHurtSound;
+
+	// Played on jump (loaded by path in the ctor).
+	UPROPERTY()
+	TObjectPtr<class USoundBase> JumpSound;
+
+public:
+	// Add a brief positional camera shake (the no-freeze impact "punch"). Intensity ~0.6 = a melee
+	// hit-landed micro-punch; ~1.2 = taking damage. Decays in Tick. Works with the FP control-rotation
+	// camera because it jitters the camera's relative LOCATION (rotation is control-driven).
+	void AddCameraShake(float Intensity);
+
+protected:
+	float CameraShakeAmount = 0.0f;
+	FVector BaseCameraRelLoc = FVector(0.0f, 0.0f, 60.0f);
 
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|Anim")
 	void PlayRandomAttackAnim();
@@ -250,6 +301,21 @@ private:
 
 	void HandleDeathTimerExpired();
 
+	// Death cam: ragdoll the hero + detach the camera, then glide it to a 3rd-person shot of the body.
+	void EnterDeathCam();
+	// Fires OnPlayerDied (BP OpenLevel→Hub) after the death cam has held for DeathCamDuration.
+	void FinishDeathAndTravel();
+	FTimerHandle DeathTravelTimerHandle;
+
+	// Death-cam camera glide state (driven in Tick): from the FP transform to the overhead shot.
+	bool bInDeathCam = false;
+	bool bDeathCamMoving = false;
+	float DeathCamMoveElapsed = 0.0f;
+	FVector DeathCamStartLoc = FVector::ZeroVector;
+	FRotator DeathCamStartRot = FRotator::ZeroRotator;
+	FVector DeathCamTargetLoc = FVector::ZeroVector;
+	FRotator DeathCamTargetRot = FRotator::ZeroRotator;
+
 	// Re-shows the death screen for whatever time remains on the GameInstance death timer.
 	// Called from BeginPlay (so hub re-creates the widget) and from the death path.
 	void ShowDeathScreenIfActive();
@@ -258,8 +324,15 @@ private:
 	// gate is open (Gravity ever maxed), grants the secret artifact on touch (one-time).
 	void CheckSecretSpheres(float DeltaSeconds);
 
+	// How many center messages are currently on screen — used to stack them vertically so multiple
+	// rapid messages (e.g. dialogue outcomes) don't draw on top of each other.
+	int32 ActiveCenterMessageCount = 0;
+
 	// Show a transient centered story message via WBP_CenterMessage (auto-removed after Duration).
+	// Public so external systems (e.g. dialogue events) can surface "what happened" text.
+public:
 	void ShowCenterMessage(const FText& Message, float Duration);
+private:
 
 	UPROPERTY()
 	TObjectPtr<ULoopedAttributeSet> AttributeSet;
