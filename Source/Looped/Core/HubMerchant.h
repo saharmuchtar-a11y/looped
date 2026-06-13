@@ -20,7 +20,9 @@ enum class EShopGoodType : uint8
 	InRunCard,          // in-run: level up an unlocked card RIGHT NOW (this run), paid in Shards
 	Heal,               // in-run: restore HP, paid in Shards
 	CleanseCurse,       // in-run: remove an active curse, paid in Shards
-	ShardExchange       // in-run: convert Shards -> permanent Echoes (poor rate)
+	ShardExchange,      // in-run: convert Shards -> permanent Echoes (poor rate)
+	RunBlessing,        // in-run: a random run Blessing, paid in Shards (the cache's star item)
+	RunMaxHP            // in-run: "Void Vigor" — +max HP for THIS run only
 };
 
 /**
@@ -75,20 +77,31 @@ protected:
 	bool bInRunShop = false;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Merchant|InRun")
-	int32 InRunCardCost = 40;     // Shards to level a card this run
+	int32 InRunCardCost = 60;     // Shards to level a card this run (legacy; cards no longer stocked)
 
 	UPROPERTY(EditDefaultsOnly, Category = "Merchant|InRun")
-	int32 InRunHealCost = 30;     // Shards to heal
+	int32 InRunHealCost = 50;     // Shards to heal
 
 	UPROPERTY(EditDefaultsOnly, Category = "Merchant|InRun")
 	float InRunHealAmount = 40.0f;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Merchant|InRun")
-	int32 InRunCleanseCost = 50;  // Shards to remove one active curse
+	int32 InRunCleanseCost = 90;  // premium — the Sanctum's blood price is the cheap path
 
-	// Rising prices: heal cost climbs by this each purchase (this visit).
+	// Rising prices: heal cost climbs by this each purchase (this visit) — no more heal-spam.
 	UPROPERTY(EditDefaultsOnly, Category = "Merchant|InRun")
-	int32 InRunHealCostStep = 10;
+	int32 InRunHealCostStep = 25;
+
+	// Cache star item: a random run Blessing.
+	UPROPERTY(EditDefaultsOnly, Category = "Merchant|InRun")
+	int32 InRunBlessingCost = 110;
+
+	// "Void Vigor" — +max HP for this run only.
+	UPROPERTY(EditDefaultsOnly, Category = "Merchant|InRun")
+	int32 InRunVigorCost = 80;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Merchant|InRun")
+	int32 InRunVigorAmount = 20;
 
 	// Shard -> Echo exchange (poor rate, a sink for leftover Shards).
 	UPROPERTY(EditDefaultsOnly, Category = "Merchant|InRun")

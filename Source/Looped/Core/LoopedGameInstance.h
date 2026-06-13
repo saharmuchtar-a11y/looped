@@ -18,6 +18,7 @@ struct FRunState
 	float CurrentHealth = 0.0f;
 	float MaxHealth = 0.0f;
 	int32 Shards = 0;                  // per-run currency
+	int32 RunBonusMaxHP = 0;           // "Void Vigor" cache purchases — +max HP for THIS run only
 	TSet<FName> ActiveCurses;          // run-scoped negative modifiers
 	TArray<FName> AcquiredArtifacts;   // run-scoped relics found this run (Treasure rooms)
 	bool bHealthInitialized = false;   // false until the first combat room seeds health
@@ -102,9 +103,26 @@ public:
 	UFUNCTION(BlueprintPure, Category = "LOOPED|Artifacts")
 	bool HasArtifact(FName ArtifactName) const;
 
-	// Newline-separated list of owned artifact names for the HUD (empty if none).
+	// Newline-separated "Name — effect" list of owned permanent relics for the HUD (empty if none).
 	UFUNCTION(BlueprintPure, Category = "LOOPED|Artifacts")
 	FText GetOwnedArtifactsLabel() const;
+
+	// Short "what it does" line for a curse (shown on pickup + in the monitor). Empty if unknown.
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Curses")
+	FText GetCurseDescription(FName Curse) const;
+
+	// --- Discovery (feeds the First Hunter's codex; recorded on first encounter, saved to disk) ---
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Discovery")
+	void RecordEnemySeen(FName EnemyTypeRow);
+
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Discovery")
+	bool IsEnemySeen(FName EnemyTypeRow) const;
+
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Discovery")
+	bool IsCurseSeen(FName Curse) const;
+
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Discovery")
+	bool IsBlessingSeen(FName ArtifactId) const;
 
 	// Artifact "GoldBar": multiplies Echoes income while owned.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Artifacts")
@@ -188,6 +206,29 @@ public:
 	UFUNCTION(Exec) void AddCurseCheat(FName Curse);
 	UFUNCTION(Exec) void ClearCursesCheat();
 
+	// --- "?" room category odds (StS-style rolling pity probabilities) ---
+	// Each "?" event room rolls its CATEGORY here: 0 = story event, 1 = fight, 2 = treasure.
+	// Fight/treasure shares GROW each "?" that doesn't produce them and reset when they hit, so
+	// long peaceful streaks make the next "?" increasingly dangerous (and lucky streaks rarer).
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Events")
+	int32 RollEventCategory();
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Events")
+	float EventFightBaseShare = 0.12f;     // base odds a "?" is a fight
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Events")
+	float EventFightPityStep = 0.05f;      // added per "?" without a fight (caps at 0.5)
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Events")
+	float EventTreasureBaseShare = 0.13f;  // base odds a "?" is treasure/loot
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Events")
+	float EventTreasurePityStep = 0.04f;   // added per "?" without treasure (caps at 0.4)
+
+	// Pity counters (transient; survive room travel within the run).
+	int32 EventRoomsSinceFight = 0;
+	int32 EventRoomsSinceTreasure = 0;
+
 	// Curse magnitudes (tunable). Each applies only while its curse FName is active this run.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Curses")
 	float CurseTitheMultiplier = 0.5f;     // "Tithe"    — currency gain x this (0 = none)
@@ -235,6 +276,20 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "LOOPED|Merchant")
 	int32 GetPermanentBonusMaxHP() const;
+
+	// Vault meta "Deep Pockets" — every run starts with +N Shards.
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Merchant")
+	void GrantPermanentStartingShards(int32 Amount);
+
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Merchant")
+	bool HasPermanentStartingShards() const;
+
+	// Vault meta "Keepsake" — every run starts with one random Blessing.
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Merchant")
+	void GrantPermanentStartingBlessing();
+
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Merchant")
+	bool HasPermanentStartingBlessing() const;
 
 	// DEV: force the vault open for testing.
 	UFUNCTION(Exec) void UnlockVaultCheat();

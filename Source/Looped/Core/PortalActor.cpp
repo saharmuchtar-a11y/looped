@@ -29,13 +29,27 @@ APortalActor::APortalActor()
 
 	PortalMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("PortalMesh"));
 	PortalMesh->SetupAttachment(RootComponent);
-	PortalMesh->SetRelativeScale3D(FVector(2.0f, 2.0f, 3.0f));
 	PortalMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
-	static ConstructorHelpers::FObjectFinder<UStaticMesh> CylinderMesh(TEXT("StaticMesh'/Engine/BasicShapes/Cylinder.Cylinder'"));
-	if (CylinderMesh.Succeeded())
+	// Default = the real portal model with the same transform the placed fork portals use, so
+	// RUNTIME-SPAWNED portals (the boss-death exit) look identical to every placed one. Falls back
+	// to the old grey cylinder only if the asset is missing. Placed instances keep their overrides.
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> PortalModel(TEXT("/Game/new_assets/portalnew/StaticMeshes/portalnew.portalnew"));
+	if (PortalModel.Succeeded())
 	{
-		PortalMesh->SetStaticMesh(CylinderMesh.Object);
+		PortalMesh->SetStaticMesh(PortalModel.Object);
+		PortalMesh->SetRelativeScale3D(FVector(2.0f, 2.0f, 2.0f));
+		PortalMesh->SetRelativeRotation(FRotator(0.0f, 270.0f, 0.0f));
+		PortalMesh->SetRelativeLocation(FVector(0.0f, 0.0f, 50.0f));
+	}
+	else
+	{
+		PortalMesh->SetRelativeScale3D(FVector(2.0f, 2.0f, 3.0f));
+		static ConstructorHelpers::FObjectFinder<UStaticMesh> CylinderMesh(TEXT("StaticMesh'/Engine/BasicShapes/Cylinder.Cylinder'"));
+		if (CylinderMesh.Succeeded())
+		{
+			PortalMesh->SetStaticMesh(CylinderMesh.Object);
+		}
 	}
 
 	// Floating type label above the portal — screen-space, hidden until SetForkType assigns one.

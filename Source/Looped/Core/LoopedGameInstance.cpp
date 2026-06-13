@@ -214,8 +214,12 @@ void ULoopedGameInstance::GrantArtifact(FName ArtifactName)
 #if !UE_BUILD_SHIPPING
 	if (GEngine)
 	{
+		// Player-facing naming: permanent items are RELICS (run items are Blessings).
+		const FArtifactData* Row = FindArtifactRow(ArtifactName);
+		const FString Desc = Row ? Row->Description.ToString() : FString();
 		GEngine->AddOnScreenDebugMessage(-1, 8.0f, FColor::Cyan,
-			FString::Printf(TEXT("=== ARTIFACT ACQUIRED: %s ==="), *ArtifactName.ToString()), true, FVector2D(2.0f, 2.0f));
+			FString::Printf(TEXT("=== RELIC ACQUIRED: %s ===%s%s"), *ArtifactName.ToString(),
+				Desc.IsEmpty() ? TEXT("") : TEXT("\n"), *Desc), true, FVector2D(2.0f, 2.0f));
 	}
 #endif
 
@@ -243,10 +247,59 @@ FText ULoopedGameInstance::GetOwnedArtifactsLabel() const
 	for (const FName& A : Stats->OwnedArtifacts)
 	{
 		if (!bFirst) Out += TEXT("\n");
-		Out += A.ToString();
+		// "Name — what it does" so the monitor explains every owned relic at a glance.
+		const FArtifactData* Row = FindArtifactRow(A);
+		if (Row && !Row->Description.IsEmpty())
+		{
+			Out += FString::Printf(TEXT("%s — %s"), *Row->DisplayName.ToString(), *Row->Description.ToString());
+		}
+		else
+		{
+			Out += A.ToString();
+		}
 		bFirst = false;
 	}
 	return FText::FromString(Out);
+}
+
+FText ULoopedGameInstance::GetCurseDescription(FName Curse) const
+{
+	// One-liners matching the live magnitudes — shown on pickup and in the monitor so a curse is
+	// never a mystery word. Keep in sync with the Curse* tunables above.
+	if (Curse == TEXT("Tithe"))     return FText::FromString(TEXT("currency gains are halved"));
+	if (Curse == TEXT("Frailty"))   return FText::FromString(TEXT("you take 50% more damage"));
+	if (Curse == TEXT("Bloodless")) return FText::FromString(TEXT("you cannot heal"));
+	if (Curse == TEXT("Leaden"))    return FText::FromString(TEXT("slower and heavier"));
+	if (Curse == TEXT("Decay"))     return FText::FromString(TEXT("your HP drains over time"));
+	if (Curse == TEXT("Marked"))    return FText::FromString(TEXT("enemies move much faster"));
+	if (Curse == TEXT("Brittle"))   return FText::FromString(TEXT("your cards act one level weaker"));
+	if (Curse == TEXT("Scarcity"))  return FText::FromString(TEXT("one fewer card choice"));
+	if (Curse == TEXT("Dimmed"))    return FText::FromString(TEXT("the world goes dark around you"));
+	return FText::GetEmpty();
+}
+
+void ULoopedGameInstance::RecordEnemySeen(FName EnemyTypeRow)
+{
+	if (!Stats || EnemyTypeRow.IsNone() || EnemyTypeRow == TEXT("Random")) return;
+	if (Stats->SeenEnemyTypes.Contains(EnemyTypeRow)) return; // only the FIRST meeting writes
+	Stats->SeenEnemyTypes.Add(EnemyTypeRow);
+	SaveStats();
+	UE_LOG(LogLoopedCore, Display, TEXT("[Discovery] Enemy seen: %s"), *EnemyTypeRow.ToString());
+}
+
+bool ULoopedGameInstance::IsEnemySeen(FName EnemyTypeRow) const
+{
+	return Stats && Stats->SeenEnemyTypes.Contains(EnemyTypeRow);
+}
+
+bool ULoopedGameInstance::IsCurseSeen(FName Curse) const
+{
+	return Stats && Stats->SeenCurses.Contains(Curse);
+}
+
+bool ULoopedGameInstance::IsBlessingSeen(FName ArtifactId) const
+{
+	return Stats && Stats->SeenBlessings.Contains(ArtifactId);
 }
 
 void ULoopedGameInstance::GrantArtifactCheat(FName ArtifactName)
@@ -422,6 +475,13 @@ void ULoopedGameInstance::AddCurse(FName Curse)
 	if (Curse.IsNone() || CurrentRunState.ActiveCurses.Contains(Curse)) return;
 	CurrentRunState.ActiveCurses.Add(Curse);
 	UE_LOG(LogLoopedCore, Display, TEXT("[Curse] +%s (active: %d)"), *Curse.ToString(), CurrentRunState.ActiveCurses.Num());
+
+	// Discovery: suffering a curse unlocks its codex entry.
+	if (Stats && !Stats->SeenCurses.Contains(Curse))
+	{
+		Stats->SeenCurses.Add(Curse);
+		SaveStats();
+	}
 #if !UE_BUILD_SHIPPING
 	if (GEngine)
 	{
@@ -468,6 +528,37 @@ void ULoopedGameInstance::ClearCurses()
 TArray<FName> ULoopedGameInstance::GetActiveCurses() const
 {
 	return CurrentRunState.ActiveCurses.Array();
+}
+
+int32 ULoopedGameInstance::RollEventCategory()
+{
+	// Rolling pity odds: fight/treasure shares grow per "?" that doesn't produce them, reset on hit.
+	const float FightShare    = FMath::Min(0.5f, EventFightBaseShare + EventFightPityStep * EventRoomsSinceFight);
+	const float TreasureShare = FMath::Min(0.4f, EventTreasureBaseShare + EventTreasurePityStep * EventRoomsSinceTreasure);
+	const float Roll = FMath::FRand();
+
+	int32 Category = 0; // story event
+	if (Roll < FightShare)
+	{
+		Category = 1;
+		EventRoomsSinceFight = 0;
+		EventRoomsSinceTreasure++;
+	}
+	else if (Roll < FightShare + TreasureShare)
+	{
+		Category = 2;
+		EventRoomsSinceTreasure = 0;
+		EventRoomsSinceFight++;
+	}
+	else
+	{
+		EventRoomsSinceFight++;
+		EventRoomsSinceTreasure++;
+	}
+	UE_LOG(LogLoopedCore, Display, TEXT("[Event] Category roll=%.2f fight=%.2f treasure=%.2f -> %s"),
+		Roll, FightShare, TreasureShare,
+		Category == 1 ? TEXT("FIGHT") : Category == 2 ? TEXT("TREASURE") : TEXT("STORY"));
+	return Category;
 }
 
 int32 ULoopedGameInstance::GetCardChoiceCount() const
@@ -521,6 +612,32 @@ bool ULoopedGameInstance::HasPermanentMaxHP() const
 int32 ULoopedGameInstance::GetPermanentBonusMaxHP() const
 {
 	return Stats ? Stats->PermanentBonusMaxHP : 0;
+}
+
+void ULoopedGameInstance::GrantPermanentStartingShards(int32 Amount)
+{
+	if (!Stats || Amount <= 0 || HasPermanentStartingShards()) return;
+	Stats->PermanentStartingShards = Amount;
+	SaveStats();
+	UE_LOG(LogLoopedCore, Display, TEXT("[Vault] Deep Pockets — runs now start with +%d Shards."), Amount);
+}
+
+bool ULoopedGameInstance::HasPermanentStartingShards() const
+{
+	return Stats && Stats->PermanentStartingShards > 0;
+}
+
+void ULoopedGameInstance::GrantPermanentStartingBlessing()
+{
+	if (!Stats || Stats->bPermanentStartingBlessing) return;
+	Stats->bPermanentStartingBlessing = true;
+	SaveStats();
+	UE_LOG(LogLoopedCore, Display, TEXT("[Vault] Keepsake — runs now start with a random Blessing."));
+}
+
+bool ULoopedGameInstance::HasPermanentStartingBlessing() const
+{
+	return Stats && Stats->bPermanentStartingBlessing;
 }
 
 void ULoopedGameInstance::UnlockVaultCheat()
@@ -911,6 +1028,35 @@ FName ULoopedGameInstance::BeginRunPath()
 	// Stamp the run-start wall clock so AddRunCompleted can time the whole run (survives OpenLevel).
 	RunStartRealTime = FPlatformTime::Seconds();
 
+	// Vault metas kick in at the moment a run begins.
+	if (Stats && Stats->PermanentStartingShards > 0)
+	{
+		AddShards(Stats->PermanentStartingShards);   // Deep Pockets
+	}
+	if (Stats && Stats->bPermanentStartingBlessing)
+	{
+		GrantRandomRunArtifact();                    // Keepsake
+	}
+
+	// Fixed opener: if the routing config's first slot pins a level (Pool=None + FixedLevel), the
+	// run ALWAYS starts there (L_Room1 = the gentle warm-up; it's in no pool, so it never repeats).
+	if (RoutingConfig && RoutingConfig->RunLayout.Num() > 0)
+	{
+		const FRunSlotRule& Opener = RoutingConfig->RunLayout[0];
+		if (Opener.Pool == ERoomPool::None && !Opener.FixedLevel.IsNone())
+		{
+			++RunRoomsEntered;
+			FRoomNode Node;
+			Node.LevelName = Opener.FixedLevel;
+			Node.Type = Opener.Type;
+			Node.RoomIndex = RunRoomsEntered;
+			CurrentRunPath.Add(Node);
+			CurrentPathIndex = 0;
+			UE_LOG(LogLoopedCore, Display, TEXT("[Routing] BeginRunPath: fixed opener -> %s"), *Opener.FixedLevel.ToString());
+			return Opener.FixedLevel;
+		}
+	}
+
 	const FName First = EnterRoomType(FName(TEXT("Combat")));
 	if (First.IsNone() || First == FName(TEXT("L_Hub")))
 	{
@@ -993,16 +1139,23 @@ TArray<FName> ULoopedGameInstance::GenerateForkChoices(int32 Count)
 	if (!RoomTypeTable) return Result;
 
 	// Build the candidate pool: fork-offerable rows with a usable level pool and positive weight.
+	const FName CurrentLevel = GetCurrentRoomNode().LevelName;
 	TArray<FName> Pool;
 	TArray<float> Weights;
 	for (const FName& RowName : RoomTypeTable->GetRowNames())
 	{
 		const FRoomTypeData* Row = RoomTypeTable->FindRow<FRoomTypeData>(RowName, TEXT("GenerateForkChoices"), false);
-		if (Row && Row->bOfferableInForks && Row->Weight > 0.0f && Row->LevelPool.Num() > 0)
+		if (!Row || !Row->bOfferableInForks || Row->Weight <= 0.0f || Row->LevelPool.Num() == 0)
 		{
-			Pool.Add(RowName);
-			Weights.Add(Row->Weight);
+			continue;
 		}
+		// No-back-to-back types (Casino) are never offered from inside one of their own levels.
+		if (Row->bNoBackToBack && Row->LevelPool.Contains(CurrentLevel))
+		{
+			continue;
+		}
+		Pool.Add(RowName);
+		Weights.Add(Row->Weight);
 	}
 
 	// Weighted draw WITHOUT replacement — guarantees the one hard rule: never two of the same type.
@@ -1079,6 +1232,13 @@ void ULoopedGameInstance::GrantRunArtifact(FName ArtifactId)
 	{
 		UE_LOG(LogLoopedCore, Warning, TEXT("[Artifacts] GrantRunArtifact: '%s' not found in DT_Artifacts — ignored."), *ArtifactId.ToString());
 		return;
+	}
+
+	// Discovery: holding a blessing once unlocks its codex entry forever.
+	if (Stats && !Stats->SeenBlessings.Contains(ArtifactId))
+	{
+		Stats->SeenBlessings.Add(ArtifactId);
+		SaveStats();
 	}
 	if (Row->Scope != EArtifactScope::Run)
 	{

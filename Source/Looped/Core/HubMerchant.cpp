@@ -94,9 +94,11 @@ void AHubMerchant::BeginPlay()
 
 	// VAULT — permanent goods (progression-gated section).
 	PermanentCatalogue.Reset();
-	PermanentCatalogue.Add({ EShopGoodType::PermanentArtifact, TEXT("GoldBar"),    TEXT("Gold Bar — +10% Echoes forever"), 500, 0 });
-	PermanentCatalogue.Add({ EShopGoodType::PermanentUpgrade,  TEXT("CardChoice"), TEXT("Foresight — +1 card choice"),     600, 0 });
-	PermanentCatalogue.Add({ EShopGoodType::PermanentUpgrade,  TEXT("MaxHP"),      TEXT("Vitality — +25 max HP forever"),  400, 25 });
+	PermanentCatalogue.Add({ EShopGoodType::PermanentArtifact, TEXT("GoldBar"),       TEXT("Gold Bar — +10% Echoes forever"),            500, 0 });
+	PermanentCatalogue.Add({ EShopGoodType::PermanentUpgrade,  TEXT("CardChoice"),    TEXT("Foresight — +1 card choice"),                600, 0 });
+	PermanentCatalogue.Add({ EShopGoodType::PermanentUpgrade,  TEXT("MaxHP"),         TEXT("Vitality — +25 max HP forever"),             450, 25 });
+	PermanentCatalogue.Add({ EShopGoodType::PermanentUpgrade,  TEXT("StartShards"),   TEXT("Deep Pockets — start runs with +60 Shards"), 550, 60 });
+	PermanentCatalogue.Add({ EShopGoodType::PermanentUpgrade,  TEXT("StartBlessing"), TEXT("Keepsake — start runs with a Blessing"),     700, 0 });
 }
 
 void AHubMerchant::OnTriggerBegin(UPrimitiveComponent* /*OverlappedComp*/, AActor* OtherActor,
@@ -140,7 +142,8 @@ void AHubMerchant::OpenShop(APlayerController* PC)
 		if (UButton* B = Cast<UButton>(ShopWidget->GetWidgetFromName(TEXT("Item3Buy"))))      B->OnClicked.AddDynamic(this, &AHubMerchant::OnBuy3);
 		if (UButton* B = Cast<UButton>(ShopWidget->GetWidgetFromName(TEXT("Item4Buy"))))      B->OnClicked.AddDynamic(this, &AHubMerchant::OnBuy4);
 		if (UButton* B = Cast<UButton>(ShopWidget->GetWidgetFromName(TEXT("CloseButton"))))   B->OnClicked.AddDynamic(this, &AHubMerchant::OnCloseClicked);
-		if (UButton* B = Cast<UButton>(ShopWidget->GetWidgetFromName(TEXT("ResetButton"))))   B->OnClicked.AddDynamic(this, &AHubMerchant::OnResetClicked);
+		// (Dev save-wipe button moved to the First Hunter's logbook — hide it in the shop.)
+		if (UButton* B = Cast<UButton>(ShopWidget->GetWidgetFromName(TEXT("ResetButton"))))   B->SetVisibility(ESlateVisibility::Collapsed);
 		if (UButton* B = Cast<UButton>(ShopWidget->GetWidgetFromName(TEXT("SectionButton")))) B->OnClicked.AddDynamic(this, &AHubMerchant::OnToggleSection);
 	}
 
@@ -191,8 +194,10 @@ bool AHubMerchant::IsItemOwned(const FShopItem& Item) const
 	case EShopGoodType::NextRunCard:       return GI->IsCardPendingNextRun(Item.Id);
 	case EShopGoodType::PermanentArtifact: return GI->HasArtifact(Item.Id);
 	case EShopGoodType::PermanentUpgrade:
-		if (Item.Id == TEXT("CardChoice")) return GI->HasPermanentCardChoice();
-		if (Item.Id == TEXT("MaxHP"))      return GI->HasPermanentMaxHP();
+		if (Item.Id == TEXT("CardChoice"))    return GI->HasPermanentCardChoice();
+		if (Item.Id == TEXT("MaxHP"))         return GI->HasPermanentMaxHP();
+		if (Item.Id == TEXT("StartShards"))   return GI->HasPermanentStartingShards();
+		if (Item.Id == TEXT("StartBlessing")) return GI->HasPermanentStartingBlessing();
 		return false;
 	default: return false;
 	}
@@ -238,28 +243,25 @@ void AHubMerchant::RefreshShop()
 		Cl.Display = TEXT("Cleanse a curse"); Cl.Cost = InRunCleanseCost;
 		Displayed.Add(Cl);
 
+		// The cache's star item: a random run Blessing (cards are gone — treasure rooms hand
+		// those out free; the cache sells what you CAN'T get elsewhere mid-run).
+		FShopItem Bl; Bl.Type = EShopGoodType::RunBlessing; Bl.Id = TEXT("Blessing");
+		Bl.Display = TEXT("Mystery Blessing"); Bl.Cost = InRunBlessingCost;
+		Displayed.Add(Bl);
+
+		FShopItem Vg; Vg.Type = EShopGoodType::RunMaxHP; Vg.Id = TEXT("Vigor");
+		Vg.Display = FString::Printf(TEXT("Void Vigor  +%d max HP (this run)"), InRunVigorAmount);
+		Vg.Cost = InRunVigorCost;
+		Displayed.Add(Vg);
+
 		FShopItem Ex; Ex.Type = EShopGoodType::ShardExchange; Ex.Id = TEXT("Exchange");
 		Ex.Display = FString::Printf(TEXT("Exchange -> %d Echoes"), InRunExchangeEchoYield);
 		Ex.Cost = InRunExchangeShardCost;
 		Displayed.Add(Ex);
 
-		// Random card stock (rerollable via the section button).
-		for (const FName& CardId : InRunStock)
-		{
-			if (Displayed.Num() >= NumSlots) break;
-			if (GI && GI->IsCardUnlocked(CardId) && !GI->IsPerkAtMax(CardId))
-			{
-				FShopItem C; C.Type = EShopGoodType::InRunCard; C.Id = CardId; C.Cost = InRunCardCost;
-				C.Display = GI->GetPerkCardLabel(CardId).ToString();
-				Displayed.Add(C);
-			}
-		}
-
-		// Repurpose the section button as REROLL in the cache shop.
+		// No card stock anymore — hide the reroll button entirely.
 		if (UButton* Sec = Cast<UButton>(ShopWidget->GetWidgetFromName(TEXT("SectionButton"))))
-			Sec->SetVisibility(ESlateVisibility::Visible);
-		if (UTextBlock* SecT = Cast<UTextBlock>(ShopWidget->GetWidgetFromName(TEXT("SectionButtonText"))))
-			SecT->SetText(FText::FromString(FString::Printf(TEXT("Reroll (%d)"), InRunRerollCost * (RerollCount + 1))));
+			Sec->SetVisibility(ESlateVisibility::Collapsed);
 	}
 	else
 	{
@@ -363,6 +365,23 @@ void AHubMerchant::TryBuy(int32 SlotIndex)
 				Player->IncrementPerkLevel(Item.Id); // applies live, this run
 			}
 			break;
+		case EShopGoodType::RunBlessing:
+			if (GI->SpendShards(Item.Cost))
+			{
+				const FName Granted = GI->GrantRandomRunArtifact();
+				if (Granted.IsNone())
+				{
+					GI->AddShards(Item.Cost); // pool exhausted — refund, never eat the player's shards
+				}
+			}
+			break;
+		case EShopGoodType::RunMaxHP:
+			if (Player && GI->SpendShards(Item.Cost))
+			{
+				GI->CurrentRunState.RunBonusMaxHP += InRunVigorAmount;
+				Player->ApplyMaxHPMod(); // re-derive; also heals the delta so it feels good
+			}
+			break;
 		default: break;
 		}
 		RefreshShop();
@@ -391,8 +410,10 @@ void AHubMerchant::TryBuy(int32 SlotIndex)
 		GI->GrantArtifact(Item.Id);
 		break;
 	case EShopGoodType::PermanentUpgrade:
-		if (Item.Id == TEXT("CardChoice")) GI->GrantPermanentCardChoice();
-		else if (Item.Id == TEXT("MaxHP")) GI->GrantPermanentMaxHP(Item.Amount);
+		if (Item.Id == TEXT("CardChoice"))         GI->GrantPermanentCardChoice();
+		else if (Item.Id == TEXT("MaxHP"))         GI->GrantPermanentMaxHP(Item.Amount);
+		else if (Item.Id == TEXT("StartShards"))   GI->GrantPermanentStartingShards(Item.Amount);
+		else if (Item.Id == TEXT("StartBlessing")) GI->GrantPermanentStartingBlessing();
 		break;
 	default: break;
 	}

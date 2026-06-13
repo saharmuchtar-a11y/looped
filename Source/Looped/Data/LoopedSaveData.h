@@ -66,6 +66,16 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")
 	TSet<FName> UnlockedCards;
 
+	// --- Discovery (the First Hunter's codex: an entry unlocks the first time you MEET it) ---
+	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")
+	TSet<FName> SeenEnemyTypes;   // DT_Enemies rows that have spawned in your runs
+
+	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")
+	TSet<FName> SeenCurses;       // curses you have suffered at least once
+
+	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")
+	TSet<FName> SeenBlessings;    // run blessings you have held at least once
+
 	// Perks that have reached max level at least once — recorded the FIRST time each maxes.
 	// Generic by perk FName, so any current OR future perk is tracked automatically.
 	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")
@@ -96,6 +106,14 @@ public:
 
 	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")
 	int32 PermanentBonusMaxHP = 0;      // +N starting max HP, forever
+
+	// Vault meta "Deep Pockets": every run begins with this many Shards.
+	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")
+	int32 PermanentStartingShards = 0;
+
+	// Vault meta "Keepsake": every run begins with one random Blessing.
+	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")
+	bool bPermanentStartingBlessing = false;
 
 	// Schema version — bump if fields change in a load-breaking way (currently 1).
 	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")

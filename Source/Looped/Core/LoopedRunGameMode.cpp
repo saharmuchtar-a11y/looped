@@ -69,8 +69,9 @@ void ALoopedRunGameMode::BeginPlay()
 			CurrentRoomIndex = Node.RoomIndex;                  // 1-based room number (forks grow this)
 			TotalRoomsInFloor = GI->RunLengthBeforeBoss + 1;    // planned run length incl. the boss
 			GI->CurrentRunRoom = Node.RoomIndex;                // keep the legacy counter in sync
-			// Show the player HP bar in combat AND boss rooms (the boss fight needs it too).
-			bShowPlayerHUD = (Node.Type == ERoomType::Combat || Node.Type == ERoomType::Boss);
+			// HP is ALWAYS visible during a run — merchant/treasure/event rooms included (Sahar:
+			// "hp must always be shown"; curses/statuses can drain you anywhere).
+			bShowPlayerHUD = true;
 
 			// Fresh treasure room — reset the "N of X" pick budget so pedestals are pickable.
 			if (Node.Type == ERoomType::Treasure)

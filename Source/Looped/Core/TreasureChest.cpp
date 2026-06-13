@@ -76,7 +76,7 @@ void ATreasureChest::RollOffer()
 			OfferName        = R->DisplayName;
 			OfferDescription = R->Description;
 		}
-		else { OfferName = FText::FromString(TEXT("Relic")); OfferDescription = FText::FromString(TEXT("No relic available.")); }
+		else { OfferName = FText::FromString(TEXT("Blessing")); OfferDescription = FText::FromString(TEXT("No blessing available.")); }
 		break;
 
 	case ETreasureRewardType::CursedRelic:
@@ -85,10 +85,13 @@ void ATreasureChest::RollOffer()
 		{
 			OfferName        = R->DisplayName;
 			OfferDescription = R->Description;
-			CurseWarningText = FText::FromString(FString::Printf(
-				TEXT("CURSED BARGAIN - injects the %s curse"), *R->AssociatedCurseId.ToString()));
+			// Spell out what the curse DOES, not just its name (Sahar: everything explains itself).
+			const FString CurseDesc = GI ? GI->GetCurseDescription(R->AssociatedCurseId).ToString() : FString();
+			CurseWarningText = FText::FromString(CurseDesc.IsEmpty()
+				? FString::Printf(TEXT("CURSED BARGAIN - injects the %s curse"), *R->AssociatedCurseId.ToString())
+				: FString::Printf(TEXT("CURSED BARGAIN - %s curse: %s"), *R->AssociatedCurseId.ToString(), *CurseDesc));
 		}
-		else { OfferName = FText::FromString(TEXT("Cursed Relic")); OfferDescription = FText::FromString(TEXT("No relic available.")); }
+		else { OfferName = FText::FromString(TEXT("Cursed Blessing")); OfferDescription = FText::FromString(TEXT("No blessing available.")); }
 		break;
 
 	case ETreasureRewardType::CardBundle:

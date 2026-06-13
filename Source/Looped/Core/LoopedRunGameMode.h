@@ -103,7 +103,7 @@ protected:
 	// --- Echoes currency rewards (permanent cross-run currency) ---
 	// Per-room award is EchoesPerRoom * room depth, so deeper rooms pay more. Tune freely.
 	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|Currency")
-	int32 EchoesPerRoom = 10;
+	int32 EchoesPerRoom = 6;   // was 10 — a full run paid ~550 Echoes = one vault meta per run, too fast
 
 	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|Currency")
 	int32 EchoesBossBonus = 100;
@@ -113,7 +113,7 @@ protected:
 	int32 ShardsPerEnemy = 5;
 
 	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|Currency")
-	int32 ShardsRoomClearBonus = 15;
+	int32 ShardsRoomClearBonus = 20;  // combat should out-earn event luck
 
 private:
 	int32 CurrentRoomIndex = 0;

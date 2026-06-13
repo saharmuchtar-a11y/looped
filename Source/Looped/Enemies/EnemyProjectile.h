@@ -38,6 +38,11 @@ protected:
 
 	float Damage = 8.0f;
 
+	// On-hit status from the element row (e.g. Ice → "Slow"), delivered to the player on impact.
+	FName StatusEffect = NAME_None;
+	float StatusMagnitude = 0.0f;
+	float StatusDuration = 0.0f;
+
 	// Blocking world hit (wall/prop) — die so geometry acts as cover.
 	UFUNCTION()
 	void OnHit(UPrimitiveComponent* HitComp, AActor* OtherActor, UPrimitiveComponent* OtherComp,

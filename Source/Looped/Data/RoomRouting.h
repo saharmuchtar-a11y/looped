@@ -55,6 +55,11 @@ struct FRoomTypeData : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room Type")
 	bool bOfferableInForks = true;
 
+	// If true, this type is never offered while the player is ALREADY in one of its levels —
+	// stops casino→casino (or rest→rest) chains without limiting normal repeats like fights.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room Type")
+	bool bNoBackToBack = false;
+
 	// Tint for the portal's hovering sign text (Fight=red, ?=yellow, Merchant=teal, etc.).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room Type")
 	FLinearColor LabelColor = FLinearColor::White;

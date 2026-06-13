@@ -122,6 +122,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|Perks")
 	void ApplyMovementMods();
 
+	// Applies an elemental status from an enemy hit (DT_ProjectileElements row fields).
+	// "Slow" (Ice): walk speed * Magnitude for Duration seconds — folds into ApplyMovementMods so it
+	// composes with Speed cards / sprint / curses. "Burn" (Fire) / "Poison" (Venom): Magnitude damage
+	// per second for Duration seconds. Re-application refreshes (no stacking). Unknown names no-op.
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Status")
+	void ApplyElementalStatus(FName StatusEffect, float Magnitude, float Duration);
+
 	// Create/refresh the on-screen owned-artifacts list (top-left HUD). Safe to call repeatedly.
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|UI")
 	void UpdateArtifactHUD();
@@ -137,6 +144,16 @@ public:
 	// monitor in reward mode if needed, hides the center placeholder, and fills the panel slot.
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|UI")
 	void MountCardWidgetInMonitor(class UUserWidget* CardWidget);
+
+	// Dialogue takes over the WHOLE monitor: opens it (slow-mo, cursor, no-damage shield), hides
+	// every dashboard zone (deck/relics/curses/artifacts/currency/logo), and fills CenterPanel
+	// with the dialogue widget — events read as the Arm Monitor analyzing the situation.
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|UI")
+	void MountDialogueInMonitor(class UUserWidget* DialogueWidget);
+
+	// Removes the dialogue, restores the dashboard zones, and closes the monitor.
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|UI")
+	void UnmountDialogueFromMonitor(class UUserWidget* DialogueWidget);
 
 	// Close the monitor: hide it, restore 1.0 time, re-lock the cursor to game.
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|UI")
@@ -183,10 +200,27 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Weapon")
 	FName WeaponAttachSocket = FName("hand_r");
 
+	// Held-weapon size in WORLD units. Hand-bone scale varies wildly between skeletons (Manny bones
+	// are scale 1; the Wanderer's Mixamo rig carries micro-scale bones its anims compensate for), so
+	// a bone-relative scale is not portable — this is applied via SetWorldScale3D after attach.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Weapon")
+	FVector WeaponWorldScale = FVector(0.3375f, 0.4f, 0.4f);
+
+	// Grip offset from the hand joint, in WORLD units along the hand's axes (rotates with the hand).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Weapon")
+	FVector WeaponGripOffset = FVector(12.0f, 10.6f, 26.6f);
+
 public:
 	// Show/clear the held weapon mesh. Called by the WeaponHolder on equip (nullptr hides it).
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|Weapon")
 	void SetWeaponVisualMesh(UStaticMesh* NewMesh);
+
+private:
+	// Applies WeaponWorldScale + WeaponGripOffset against the LIVE socket transform. Runs at equip
+	// and again shortly after (the first frames may still be in the pre-anim reference pose, whose
+	// bone scale differs on the Wanderer rig).
+	void NormalizeWeaponTransform();
+	FTimerHandle WeaponNormalizeTimerHandle;
 
 protected:
 
@@ -354,7 +388,31 @@ private:
 
 	bool bInHubLevel = false;
 	float SecretSphereCheckAccum = 0.0f;
+	// Delays the "run won" beat after the sphere-touch lore so cause precedes the portal.
+	FTimerHandle SecretWinTimerHandle;
 
 	// Curse "Decay": accumulates fractional HP loss so we apply it in ~1 HP chunks (less log spam).
 	float DecayAccum = 0.0f;
+
+	// --- Curse "Dimmed": the world goes dark (camera exposure drop). UI is UMG = unaffected;
+	// emissive markers/lights stand out MORE in the gloom (intended — they guide you through it).
+public:
+	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|Curses")
+	float DimmedExposureBias = -1.5f; // ~65% darker; -1.0 = half brightness
+private:
+	float DimmedCheckAccum = 0.0f;
+	bool bDimmedActive = false;
+	void UpdateDimmedEffect(float DeltaSeconds);
+
+	// --- Elemental statuses (from enemy projectiles, DT_ProjectileElements rows) ---
+	// Ice slow: multiplies into ApplyMovementMods' walk speed (1.0 = no slow). Timer restores it.
+	float StatusSlowMultiplier = 1.0f;
+	FTimerHandle StatusSlowTimerHandle;
+	void EndStatusSlow();
+
+	// Fire burn / venom poison: flat damage per 1s tick. Re-application refreshes the tick count.
+	float StatusBurnDamagePerTick = 0.0f;
+	int32 StatusBurnTicksRemaining = 0;
+	FTimerHandle StatusBurnTimerHandle;
+	void StatusBurnTick();
 };

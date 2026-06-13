@@ -56,7 +56,7 @@ ALoopedCharacter::ALoopedCharacter()
 	GetCharacterMovement()->BrakingDecelerationFalling = 0.0f;
 	GetCharacterMovement()->FallingLateralFriction = 0.0f;
 	GetCharacterMovement()->NavAgentProps.bCanCrouch = true;
-	GetCharacterMovement()->CrouchedHalfHeight = 44.0f;
+	GetCharacterMovement()->SetCrouchedHalfHeight(44.0f);
 
 	// Player-hurt SFX — loaded by path (plays when damage lands).
 	static ConstructorHelpers::FObjectFinder<USoundBase> HurtSnd(TEXT("/Game/Audio/player_hurt.player_hurt"));
@@ -133,6 +133,30 @@ void ALoopedCharacter::SetWeaponVisualMesh(UStaticMesh* NewMesh)
 	}
 	WeaponMeshComp->SetStaticMesh(NewMesh);
 	WeaponMeshComp->SetVisibility(NewMesh != nullptr);
+
+	if (NewMesh)
+	{
+		// Normalize now AND once the anim pose is live — the first frames can still be in the
+		// reference pose, whose bone scale differs from the animated pose on the Wanderer rig.
+		NormalizeWeaponTransform();
+		GetWorldTimerManager().SetTimer(WeaponNormalizeTimerHandle, this,
+			&ALoopedCharacter::NormalizeWeaponTransform, 0.25f, false);
+	}
+}
+
+void ALoopedCharacter::NormalizeWeaponTransform()
+{
+	if (!WeaponMeshComp || !GetMesh() || !WeaponMeshComp->GetStaticMesh()) return;
+
+	// World-unit sizing + grip offset, applied against the live socket transform. UE derives the
+	// (skeleton-specific) relative values from these, so the same numbers hold the weapon the same
+	// way on Manny, the Wanderer, or any future hero rig. Grip ROTATION stays the BP-tuned relative
+	// rotation (scale-independent).
+	const FTransform SocketT = GetMesh()->GetSocketTransform(WeaponAttachSocket);
+	WeaponMeshComp->SetWorldScale3D(WeaponWorldScale);
+	WeaponMeshComp->SetWorldLocation(SocketT.GetLocation() + SocketT.TransformVectorNoScale(WeaponGripOffset));
+	UE_LOG(LogLoopedCore, Display, TEXT("Weapon normalized: socket=%s socket_scale=%s world_scale=%s"),
+		*WeaponAttachSocket.ToString(), *SocketT.GetScale3D().ToString(), *WeaponWorldScale.ToString());
 }
 
 void ALoopedCharacter::BeginPlay()
@@ -143,6 +167,22 @@ void ALoopedCharacter::BeginPlay()
 	if (FirstPersonCamera)
 	{
 		BaseCameraRelLoc = FirstPersonCamera->GetRelativeLocation();
+	}
+
+	// FP head-clip fix: the eye camera sits at head height, so hide the head bone (whichever
+	// naming this mesh uses — Wanderer "Head" / Manny "head"). Un-hidden by the death cam so
+	// the 3rd-person corpse keeps its head.
+	if (USkeletalMeshComponent* BodyMesh = GetMesh())
+	{
+		static const FName HeadBoneNames[] = { FName(TEXT("Head")), FName(TEXT("head")) };
+		for (const FName& Bone : HeadBoneNames)
+		{
+			if (BodyMesh->GetBoneIndex(Bone) != INDEX_NONE)
+			{
+				BodyMesh->HideBoneByName(Bone, EPhysBodyOp::PBO_None);
+				break;
+			}
+		}
 	}
 
 	// Fade in from black on every level load. Paired with APortalActor's fade-out before travel,
@@ -439,8 +479,24 @@ void ALoopedCharacter::EnterDeathCam()
 		Move->DisableMovement();
 	}
 
-	// Ragdoll the hero so the body crumples to the floor (same approach as enemies). Make sure the
-	// body is visible to its owner (FP setups often hide it) and doesn't block via the capsule.
+	// Restore the head (hidden for first-person) so the 3rd-person death shot shows a whole body.
+	if (USkeletalMeshComponent* BodyMesh = GetMesh())
+	{
+		static const FName HeadBoneNames[] = { FName(TEXT("Head")), FName(TEXT("head")) };
+		for (const FName& Bone : HeadBoneNames)
+		{
+			if (BodyMesh->GetBoneIndex(Bone) != INDEX_NONE)
+			{
+				BodyMesh->UnHideBoneByName(Bone);
+				break;
+			}
+		}
+	}
+
+	// Ragdoll the hero so the body crumples to the floor (Manny's PA_Mannequin handles this well).
+	// NOTE: if a hero mesh with a broken/micro-scale physics asset ever returns (the old Meshy
+	// Wanderer import), swap this back to the pause-and-tip fallback — its ragdoll collapses to a
+	// speck. Make sure the body is visible to its owner and doesn't block via the capsule.
 	if (USkeletalMeshComponent* M = GetMesh())
 	{
 		M->SetOwnerNoSee(false);
@@ -661,6 +717,79 @@ void ALoopedCharacter::MountCardWidgetInMonitor(UUserWidget* CardWidget)
 	RefreshDashboard();
 }
 
+// Dashboard widgets hidden while a dialogue owns the monitor. CenterHeader/CenterPlaceholder are
+// already Collapsed by design (card-draft layout), so only these need toggling.
+static const TCHAR* GDialogueHiddenZones[] = {
+	TEXT("TL_Deck"), TEXT("TR_Relics"), TEXT("BL_Curses"), TEXT("BR_Stats"),
+	TEXT("ShardsText"), TEXT("EchoesText"), TEXT("LogoImage")
+};
+
+void ALoopedCharacter::MountDialogueInMonitor(UUserWidget* DialogueWidget)
+{
+	if (!DialogueWidget) return;
+
+	if (!bHologramOpen)
+	{
+		OpenHologram(/*bRewardMode*/ true); // slow-mo + free cursor + no-damage, CenterPanel shown
+	}
+	if (!WristMenuWidget) return;
+
+	for (const TCHAR* Name : GDialogueHiddenZones)
+	{
+		if (UWidget* W = WristMenuWidget->GetWidgetFromName(Name))
+		{
+			W->SetVisibility(ESlateVisibility::Collapsed);
+		}
+	}
+	if (UWidget* Placeholder = WristMenuWidget->GetWidgetFromName(TEXT("CenterPlaceholder")))
+	{
+		Placeholder->SetVisibility(ESlateVisibility::Collapsed);
+	}
+
+	if (UPanelWidget* Center = Cast<UPanelWidget>(WristMenuWidget->GetWidgetFromName(TEXT("CenterPanel"))))
+	{
+		Center->SetVisibility(ESlateVisibility::Visible);
+		// StartDialogue runs once per NODE — only add the widget the first time.
+		if (DialogueWidget->GetParent() == nullptr && !DialogueWidget->IsInViewport())
+		{
+			if (UPanelSlot* Added = Center->AddChild(DialogueWidget))
+			{
+				if (UVerticalBoxSlot* VSlot = Cast<UVerticalBoxSlot>(Added))
+				{
+					FSlateChildSize FillSize;
+					FillSize.SizeRule = ESlateSizeRule::Fill;
+					FillSize.Value = 1.0f;
+					VSlot->SetSize(FillSize);
+					VSlot->SetHorizontalAlignment(HAlign_Fill);
+					VSlot->SetVerticalAlignment(VAlign_Fill);
+				}
+			}
+		}
+	}
+}
+
+void ALoopedCharacter::UnmountDialogueFromMonitor(UUserWidget* DialogueWidget)
+{
+	if (DialogueWidget)
+	{
+		DialogueWidget->RemoveFromParent();
+	}
+	if (WristMenuWidget)
+	{
+		for (const TCHAR* Name : GDialogueHiddenZones)
+		{
+			if (UWidget* W = WristMenuWidget->GetWidgetFromName(Name))
+			{
+				W->SetVisibility(ESlateVisibility::Visible);
+			}
+		}
+	}
+	if (bHologramOpen)
+	{
+		CloseHologram(); // restores time + cursor lock
+	}
+}
+
 void ALoopedCharacter::OpenHologram(bool bRewardMode)
 {
 	bHologramOpen = true;
@@ -763,18 +892,29 @@ void ALoopedCharacter::RefreshDashboard()
 	SetText(TEXT("PerksText"), Perks.IsEmpty() ? FString(TEXT("(no cards yet)")) : Perks);
 
 	// Right: relics + curses (names for now; icon wrap-boxes are a polish follow-up)
+	// Run blessings + curses as "Name — what it does" so nothing on the monitor is a mystery word.
 	FString Relics;
 	for (const FName& Id : GI->GetRunArtifacts())
 	{
 		const FArtifactData* R = GI->FindArtifactRow(Id);
-		Relics += FString::Printf(TEXT("%s\n"), R ? *R->DisplayName.ToString() : *Id.ToString());
+		if (R && !R->Description.IsEmpty())
+		{
+			Relics += FString::Printf(TEXT("%s — %s\n"), *R->DisplayName.ToString(), *R->Description.ToString());
+		}
+		else
+		{
+			Relics += FString::Printf(TEXT("%s\n"), R ? *R->DisplayName.ToString() : *Id.ToString());
+		}
 	}
 	SetText(TEXT("RelicsText"), Relics.IsEmpty() ? FString(TEXT("(none)")) : Relics);
 
 	FString Curses;
 	for (const FName& C : GI->GetActiveCurses())
 	{
-		Curses += FString::Printf(TEXT("%s\n"), *C.ToString());
+		const FString Desc = GI->GetCurseDescription(C).ToString();
+		Curses += Desc.IsEmpty()
+			? FString::Printf(TEXT("%s\n"), *C.ToString())
+			: FString::Printf(TEXT("%s — %s\n"), *C.ToString(), *Desc);
 	}
 	SetText(TEXT("CursesText"), Curses.IsEmpty() ? FString(TEXT("(none)")) : Curses);
 }
@@ -843,6 +983,7 @@ void ALoopedCharacter::Tick(float DeltaSeconds)
 
 	// Secret chain link 3: while the gate is open, touching a room's Time Sphere grants an artifact.
 	CheckSecretSpheres(DeltaSeconds);
+	UpdateDimmedEffect(DeltaSeconds);
 
 	// Curse "Decay": bleed HP over the run. Accumulate and apply in ~1 HP chunks via the
 	// normal damage path (handles death/stats). Curses are cleared in the Hub, so this only
@@ -936,6 +1077,7 @@ void ALoopedCharacter::ApplyMaxHPMod()
 		if (const FPassiveCardLevel* Lv = GetLevelData(GI, TEXT("MaxHP"))) Bonus += Lv->FlatMaxHP;
 		Bonus += (float)GI->GetPermanentBonusMaxHP();
 		Bonus += GI->GetArtifactFlatMaxHP(); // run relics (Bloodstone +25)
+		Bonus += (float)GI->CurrentRunState.RunBonusMaxHP; // Void Vigor cache purchases (this run)
 	}
 	POCMaxHealth = 100.0f + Bonus;
 	const float Delta = POCMaxHealth - OldMax;
@@ -1096,14 +1238,39 @@ void ALoopedCharacter::CheckSecretSpheres(float DeltaSeconds)
 			// Player-facing story beat for the grant.
 			ShowCenterMessage(SecretSphereMessage, SecretSphereMessageDuration);
 
-			// Secret shortcut: also instantly win the run (spawns the home portal).
-			if (ALoopedRunGameMode* GM = GetWorld() ? GetWorld()->GetAuthGameMode<ALoopedRunGameMode>() : nullptr)
+			// Beat 2, after the lore lands: SAY what it means, THEN open the way home — the portal
+			// appearing is now a consequence the player just read about, not an unexplained pop.
+			GetWorldTimerManager().SetTimer(SecretWinTimerHandle, FTimerDelegate::CreateWeakLambda(this, [this]()
 			{
-				GM->NotifyRunWon();
-			}
+				ShowCenterMessage(FText::FromString(TEXT("SECRET CLAIMED — THE RUN IS WON.\nThe way home has opened.")), 5.0f);
+				if (ALoopedRunGameMode* GM = GetWorld() ? GetWorld()->GetAuthGameMode<ALoopedRunGameMode>() : nullptr)
+				{
+					GM->NotifyRunWon();
+				}
+			}), 2.2f, false);
 			return;
 		}
 	}
+}
+
+void ALoopedCharacter::UpdateDimmedEffect(float DeltaSeconds)
+{
+	// Cheap 3Hz poll: while the "Dimmed" curse is active the world drops to a fraction of its
+	// brightness via a camera exposure override. UMG (monitor / dialogues / shop / HP bar) renders
+	// after post-processing so it stays fully readable; emissive markers glow THROUGH the dark.
+	DimmedCheckAccum += DeltaSeconds;
+	if (DimmedCheckAccum < 0.33f) return;
+	DimmedCheckAccum = 0.0f;
+
+	const ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>();
+	const bool bShouldDim = GI && GI->HasCurse(TEXT("Dimmed"));
+	if (bShouldDim == bDimmedActive || !FirstPersonCamera) return;
+
+	bDimmedActive = bShouldDim;
+	FirstPersonCamera->PostProcessSettings.bOverride_AutoExposureBias = bShouldDim;
+	FirstPersonCamera->PostProcessSettings.AutoExposureBias = DimmedExposureBias;
+	UE_LOG(LogLoopedCore, Display, TEXT("[Curse] Dimmed %s (exposure bias %.1f)"),
+		bShouldDim ? TEXT("ON — the world darkens") : TEXT("OFF"), bShouldDim ? DimmedExposureBias : 0.0f);
 }
 
 void ALoopedCharacter::ShowCenterMessage(const FText& Message, float Duration)
@@ -1164,11 +1331,70 @@ void ALoopedCharacter::ApplyMovementMods()
 	}
 
 	const float ArtifactGravityMul = GI ? GI->GetArtifactGravityMult() : 1.0f; // run relics (Featherweight 0.85)
-	const float NewWalk = BaseWalkSpeed * SpeedMul;
+	const float NewWalk = BaseWalkSpeed * SpeedMul * StatusSlowMultiplier; // ice slow folds in here
 	const float FinalGravity = BaseGravity * GravityMul * CurseGravityMul * ArtifactGravityMul;
 	GetCharacterMovement()->MaxWalkSpeed = bIsSprinting ? (NewWalk * SprintSpeedMultiplier) : NewWalk;
 	GetCharacterMovement()->GravityScale = FinalGravity;
 
 	UE_LOG(LogLoopedCore, Display, TEXT("Movement mods applied: speed=%.0f (mul %.2f) gravity_scale=%.2f"),
 		NewWalk, SpeedMul, FinalGravity);
+}
+
+void ALoopedCharacter::ApplyElementalStatus(FName StatusEffect, float Magnitude, float Duration)
+{
+	if (StatusEffect.IsNone() || Duration <= 0.0f || !IsAlive())
+	{
+		return;
+	}
+
+	if (StatusEffect == TEXT("Slow"))
+	{
+		// Magnitude = speed multiplier while chilled (e.g. 0.55). Clamp so data can't fully root the player.
+		const bool bWasSlowed = StatusSlowMultiplier < 1.0f;
+		StatusSlowMultiplier = FMath::Clamp(Magnitude, 0.25f, 1.0f);
+		ApplyMovementMods();
+		GetWorldTimerManager().SetTimer(StatusSlowTimerHandle, this, &ALoopedCharacter::EndStatusSlow, Duration, false);
+		if (!bWasSlowed)
+		{
+			ShowCenterMessage(FText::FromString(TEXT("CHILLED — movement slowed!")), 1.2f);
+		}
+		UE_LOG(LogLoopedCore, Display, TEXT("Status SLOW applied: x%.2f for %.1fs"), StatusSlowMultiplier, Duration);
+	}
+	else if (StatusEffect == TEXT("Burn") || StatusEffect == TEXT("Poison") || StatusEffect == TEXT("Venom"))
+	{
+		// Magnitude = damage per 1s tick. Re-application refreshes the clock, never stacks.
+		const bool bWasBurning = StatusBurnTicksRemaining > 0;
+		StatusBurnDamagePerTick = Magnitude;
+		StatusBurnTicksRemaining = FMath::Max(1, FMath::CeilToInt(Duration));
+		GetWorldTimerManager().SetTimer(StatusBurnTimerHandle, this, &ALoopedCharacter::StatusBurnTick, 1.0f, true);
+		if (!bWasBurning)
+		{
+			const bool bPoison = (StatusEffect != TEXT("Burn"));
+			ShowCenterMessage(FText::FromString(bPoison ? TEXT("POISONED!") : TEXT("BURNING!")), 1.2f);
+		}
+		UE_LOG(LogLoopedCore, Display, TEXT("Status %s applied: %.1f dmg/s x%d ticks"), *StatusEffect.ToString(), Magnitude, StatusBurnTicksRemaining);
+	}
+}
+
+void ALoopedCharacter::EndStatusSlow()
+{
+	StatusSlowMultiplier = 1.0f;
+	ApplyMovementMods();
+}
+
+void ALoopedCharacter::StatusBurnTick()
+{
+	if (StatusBurnTicksRemaining <= 0 || !IsAlive())
+	{
+		GetWorldTimerManager().ClearTimer(StatusBurnTimerHandle);
+		StatusBurnTicksRemaining = 0;
+		return;
+	}
+	StatusBurnTicksRemaining--;
+	// Routed through the normal damage path so HUD/death/run-state sync all behave.
+	TakeDamageFromEnemy(StatusBurnDamagePerTick);
+	if (StatusBurnTicksRemaining <= 0)
+	{
+		GetWorldTimerManager().ClearTimer(StatusBurnTimerHandle);
+	}
 }

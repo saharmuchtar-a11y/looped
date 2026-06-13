@@ -57,6 +57,13 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "LOOPED|Enemy")
 	void BP_OnDied();
 
+	// Applies a DT_Enemies archetype row over this enemy's defaults (HP/speed/scale/color/
+	// behavior/damage/element). Called automatically in BeginPlay when EnemyTypeRow is set;
+	// also callable right after a runtime spawn (before the enemy has taken damage).
+	// Returns false (and changes nothing) if the table/row can't be resolved.
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Enemy")
+	bool ApplyEnemyType(FName RowName);
+
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|Enemy")
 	void Respawn();
 
@@ -85,6 +92,17 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UStaticMeshComponent> VisualMesh;
+
+	// --- Archetype (DT_Enemies) ---
+	// Row to apply from the enemy-type table. NAME_None = use the values below as-is (legacy
+	// per-instance tuning keeps working untouched). Set per placed enemy, or by the spawner.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Type")
+	FName EnemyTypeRow = NAME_None;
+
+	// The archetype table. Left null it lazy-loads /Game/Data/DT_Enemies at BeginPlay, so levels
+	// don't need a manual assignment and there's no constructor dependency on the asset existing.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Type")
+	TObjectPtr<class UDataTable> EnemyTypeTable;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "POC")
 	float POCHealth = 100.0f;
@@ -170,6 +188,13 @@ protected:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Ranged")
 	float KiteStrafeDistance = 350.0f;
+
+	// --- Guard post ---
+	// > 0 = this enemy DEFENDS its spawn spot instead of chasing across the map: kiting/strafing is
+	// clamped inside this radius of home, melee only engages targets near the post, and a strayed
+	// guard walks back. Set on placed enemies holding ground (e.g. The Overlook's platform crew).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Guard")
+	float GuardRadius = 0.0f;
 
 	// --- Navigation ---
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Nav")
@@ -441,6 +466,9 @@ private:
 	// Stuck detection
 	FVector LastStuckCheckLocation = FVector::ZeroVector;
 	float StuckTimer = 0.0f;
+
+	// Guard post home (spawn location, captured in BeginPlay).
+	FVector GuardHome = FVector::ZeroVector;
 
 	// Kite strafe direction (-1 or +1)
 	float KiteStrafeSign = 1.0f;

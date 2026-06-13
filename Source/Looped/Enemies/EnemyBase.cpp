@@ -89,12 +89,121 @@ AEnemyBase::AEnemyBase()
 	}
 }
 
+bool AEnemyBase::ApplyEnemyType(FName RowName)
+{
+	if (RowName.IsNone())
+	{
+		return false;
+	}
+
+	// Lazy-load the shared table so levels/BPs don't each need an assignment and the
+	// constructor has no hard dependency on the asset existing yet.
+	if (!EnemyTypeTable)
+	{
+		EnemyTypeTable = LoadObject<UDataTable>(nullptr, TEXT("/Game/Data/DT_Enemies.DT_Enemies"));
+	}
+	if (!EnemyTypeTable)
+	{
+		UE_LOG(LogLoopedAI, Warning, TEXT("%s: EnemyTypeRow '%s' set but DT_Enemies not found — keeping instance values."), *GetName(), *RowName.ToString());
+		return false;
+	}
+
+	// "Random" = weighted roll over the table (SpawnWeight, MinFloor-gated) — different mix every
+	// run. Set placed filler enemies to Random and keep each room's signature enemy a fixed row.
+	if (RowName == TEXT("Random"))
+	{
+		const int32 CurrentFloor = 1; // single floor today; reads the run state once Floors 2-3 exist
+		float TotalWeight = 0.0f;
+		TArray<TPair<FName, float>> Candidates;
+		for (const auto& Pair : EnemyTypeTable->GetRowMap())
+		{
+			const FEnemyTypeData* Candidate = reinterpret_cast<const FEnemyTypeData*>(Pair.Value);
+			if (Candidate && Candidate->SpawnWeight > 0.0f && Candidate->MinFloor <= CurrentFloor)
+			{
+				TotalWeight += Candidate->SpawnWeight;
+				Candidates.Emplace(Pair.Key, Candidate->SpawnWeight);
+			}
+		}
+		if (Candidates.Num() == 0)
+		{
+			UE_LOG(LogLoopedAI, Warning, TEXT("%s: Random enemy type requested but no eligible DT_Enemies rows."), *GetName());
+			return false;
+		}
+		float Roll = FMath::FRandRange(0.0f, TotalWeight);
+		RowName = Candidates.Last().Key;
+		for (const auto& Candidate : Candidates)
+		{
+			Roll -= Candidate.Value;
+			if (Roll <= 0.0f)
+			{
+				RowName = Candidate.Key;
+				break;
+			}
+		}
+	}
+
+	const FEnemyTypeData* Row = EnemyTypeTable->FindRow<FEnemyTypeData>(RowName, TEXT("ApplyEnemyType"));
+	if (!Row)
+	{
+		UE_LOG(LogLoopedAI, Warning, TEXT("%s: EnemyTypeRow '%s' not in DT_Enemies — keeping instance values."), *GetName(), *RowName.ToString());
+		return false;
+	}
+
+	EnemyTypeRow = RowName;
+
+	POCHealth = Row->MaxHealth;
+	MoveSpeed = Row->MoveSpeed;
+	EnemyColor = Row->EnemyColor;
+	bIsRanged = Row->bIsRanged;
+	bHybridMelee = Row->bHybridMelee;
+	MeleeDamage = Row->MeleeDamage;
+	RangedDamage = Row->RangedDamage;
+	RangedFireRate = Row->RangedFireRate;
+	WindupDuration = Row->WindupDuration;
+	ProjectileElement = Row->ProjectileElement;
+	SetActorScale3D(FVector(Row->Scale));
+
+	// Runtime application (spawner path): BeginPlay already ran, so redo the bits it derived.
+	if (HasActorBegunPlay())
+	{
+		CurrentHealth = POCHealth;
+		MaxHealthCached = POCHealth;
+		BaseSpeed = MoveSpeed;
+		AIState = bIsRanged ? EEnemyAIState::Kite : EEnemyAIState::Approach;
+
+		// bIsRanged may have flipped — reassign the matching base material + dynamic instance.
+		if (VisualMesh)
+		{
+			if (UMaterialInterface* BaseMat = bIsRanged ? RangedMaterial : MeleeMaterial)
+			{
+				VisualMesh->SetMaterial(0, BaseMat);
+			}
+			DynMaterial = VisualMesh->CreateDynamicMaterialInstance(0);
+		}
+		RefreshSpeed();
+		RefreshColor();
+	}
+
+	// Discovery: meeting an archetype unlocks its codex entry (first time only; saved to disk).
+	if (ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
+	{
+		GI->RecordEnemySeen(RowName);
+	}
+
+	UE_LOG(LogLoopedAI, Display, TEXT("%s: applied enemy type '%s' (HP=%.0f %s%s)"), *GetName(), *RowName.ToString(), POCHealth, bIsRanged ? TEXT("RANGED") : TEXT("MELEE"), bHybridMelee ? TEXT("+HYBRID") : TEXT(""));
+	return true;
+}
+
 void AEnemyBase::BeginPlay()
 {
 	Super::BeginPlay();
 
 	AbilitySystemComponent->InitAbilityActorInfo(this, this);
 	AbilitySystemComponent->InitializeAttributes();
+
+	// Archetype row (if set) overrides the per-instance POC values BEFORE anything is derived
+	// from them. Enemies without a row behave exactly as before.
+	const bool bTypeApplied = ApplyEnemyType(EnemyTypeRow);
 
 	CurrentHealth = POCHealth;
 	MaxHealthCached = POCHealth;
@@ -151,10 +260,15 @@ void AEnemyBase::BeginPlay()
 	}
 	else if (bIsRanged)
 	{
-		SetActorScale3D(FVector(0.7f, 0.7f, 1.4f));
-		EnemyColor = FLinearColor(0.2f, 0.3f, 0.8f, 1.0f);
-		MoveSpeed = 260.0f;
-		BaseSpeed = MoveSpeed;
+		// Legacy ranged cosmetics — only when no archetype row drove them (the table owns
+		// scale/color/speed for typed enemies; stomping them here would undo the row).
+		if (!bTypeApplied)
+		{
+			SetActorScale3D(FVector(0.7f, 0.7f, 1.4f));
+			EnemyColor = FLinearColor(0.2f, 0.3f, 0.8f, 1.0f);
+			MoveSpeed = 260.0f;
+			BaseSpeed = MoveSpeed;
+		}
 		AIState = EEnemyAIState::Kite;
 	}
 	else
@@ -164,6 +278,9 @@ void AEnemyBase::BeginPlay()
 
 	RefreshSpeed();
 	RefreshColor();
+
+	// Guard post = where we spawned. Only used when GuardRadius > 0.
+	GuardHome = GetActorLocation();
 
 	// Assign a flank slot deterministically per actor so multiple melee enemies spread out
 	const uint32 NameHash = GetTypeHash(GetName());
@@ -272,6 +389,19 @@ void AEnemyBase::Tick(float DeltaTime)
 
 void AEnemyBase::TickMelee(float DeltaTime, APawn* Player)
 {
+	// Guard post: a melee guard only engages targets inside its territory; otherwise it returns to
+	// (and idles at) home instead of chasing across the map. Makes platform/chokepoint defenders real.
+	if (GuardRadius > 0.0f && Player &&
+		FVector::Dist2D(Player->GetActorLocation(), GuardHome) > GuardRadius * 1.25f)
+	{
+		if (FVector::Dist2D(GetActorLocation(), GuardHome) > 150.0f)
+		{
+			const FVector Back = ComputeNavTarget(GuardHome);
+			AddMovementInput((Back - GetActorLocation()).GetSafeNormal2D(), 1.0f);
+		}
+		return;
+	}
+
 	const FVector PlayerLoc = Player->GetActorLocation();
 	const FVector MyLoc = GetActorLocation();
 	const float Dist = FVector::Dist2D(PlayerLoc, MyLoc);
@@ -426,6 +556,21 @@ void AEnemyBase::TickRanged(float DeltaTime, APawn* Player)
 		}
 		const FVector SideDir = FVector::CrossProduct(FVector::UpVector, ToPlayer).GetSafeNormal2D();
 		DesiredDest = MyLoc + SideDir * KiteStrafeSign * KiteStrafeDistance;
+	}
+
+	// Guard post: defend home instead of chasing. Every kite decision is clamped inside the guard
+	// zone (a strayed guard walks back). Firing below is untouched — guards still telegraph + shoot
+	// anything in range with LOS, which is the whole point of holding the high ground.
+	if (GuardRadius > 0.0f)
+	{
+		if (FVector::Dist2D(MyLoc, GuardHome) > GuardRadius)
+		{
+			DesiredDest = GuardHome;
+		}
+		else if (FVector::Dist2D(DesiredDest, GuardHome) > GuardRadius)
+		{
+			DesiredDest = GuardHome + (DesiredDest - GuardHome).GetSafeNormal2D() * (GuardRadius * 0.8f);
+		}
 	}
 
 	if (PathRefreshTimer <= 0.0f || !bHasNavTarget)

@@ -64,7 +64,10 @@ void AEnemyProjectile::Init(float InDamage, float InSpeed, FName InElementId)
 		{
 			OrbColor = Row->OrbColor;
 			Damage = InDamage * Row->DamageMultiplier;
-			// (Row->StatusEffect/Magnitude/Duration carried for when player-status application ships.)
+			// Carry the element's on-hit status — delivered to the player in OnOverlap.
+			StatusEffect = Row->StatusEffect;
+			StatusMagnitude = Row->StatusMagnitude;
+			StatusDuration = Row->StatusDuration;
 		}
 	}
 
@@ -114,6 +117,11 @@ void AEnemyProjectile::OnOverlap(UPrimitiveComponent* OverlappedComp, AActor* Ot
 	if (ALoopedCharacter* Player = Cast<ALoopedCharacter>(OtherActor))
 	{
 		Player->TakeDamageFromEnemy(Damage);
+		// Elemental on-hit status (Ice chills, Fire burns, Venom poisons) — no-op when the row has none.
+		if (!StatusEffect.IsNone())
+		{
+			Player->ApplyElementalStatus(StatusEffect, StatusMagnitude, StatusDuration);
+		}
 		Destroy();
 	}
 }

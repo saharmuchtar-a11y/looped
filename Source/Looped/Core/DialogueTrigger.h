@@ -32,8 +32,18 @@ public:
 
 	// If non-empty, BeginPlay picks ONE of these at random as RootNode — so a single reusable event
 	// level (L_Event) shows a different event each visit. Add an event = add its root node here.
+	// These are the STORY pool; the GameInstance pity roll may divert to the pools below.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Dialogue")
 	TArray<FName> RandomRootNodes;
+
+	// FIGHT-category events (ambushes/duels). Picked when GI::RollEventCategory() lands on fight —
+	// odds GROW each peaceful "?" (StS pity). Empty = category falls back to RandomRootNodes.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Dialogue")
+	TArray<FName> FightRootNodes;
+
+	// TREASURE-category events (loot/windfalls). Same pity behavior as fights.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Dialogue")
+	TArray<FName> TreasureRootNodes;
 
 	// Auto-open the dialogue shortly after the level loads (event rooms) instead of waiting for the
 	// player to walk into the trigger sphere.
@@ -103,12 +113,29 @@ private:
 
 	void ShowNode(const FDialogueNode& Node);
 	void HandleChoice(int32 Index);
-	void ApplyOutcome(const FDialogueChoice& Choice);
+	// Applies the choice's outcome and RETURNS the "what happened" line ("+50 Shards"). The caller
+	// routes it: into the dialogue's gold ResultText while the talk continues, or as a screen
+	// message when the choice closes the dialogue (so nothing ever overlaps the open panel).
+	FString ApplyOutcome(const FDialogueChoice& Choice);
+	void SetResultLine(const FString& Result);
 
 	UPROPERTY()
 	UUserWidget* DialogueWidget = nullptr;
 
 	UFUNCTION() void AutoStart();
+
+	// --- Fight events (EDialogueOutcome::StartFight) ---
+	// Spawns Count enemies of the DT_Enemies archetype around the trigger once the dialogue closes.
+	// Exit portals stay locked until every spawned enemy is dead; winning pays artifact + shards.
+	void SpawnFight();
+	UFUNCTION() void OnFightEnemyDied(class AEnemyBase* Enemy);
+	void OnFightWon();
+
+	bool bFightPending = false;          // set by ApplyOutcome, consumed by CloseDialogue
+	FName PendingFightRow;               // DT_Enemies row ("Random" allowed — rolls per enemy)
+	int32 PendingFightCount = 0;
+	int32 FightEnemiesAlive = 0;
+	FTimerHandle FightSpawnTimer;
 
 	TArray<FDialogueChoice> CurrentChoices;
 	FTimerHandle AutoStartTimer;
