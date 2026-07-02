@@ -22,6 +22,10 @@ struct FRunState
 	TSet<FName> ActiveCurses;          // run-scoped negative modifiers
 	TArray<FName> AcquiredArtifacts;   // run-scoped relics found this run (Treasure rooms)
 	bool bHealthInitialized = false;   // false until the first combat room seeds health
+
+	// Once-per-run companion relic tokens (rescue system). Reset with the rest of the run state.
+	bool bSecondWindUsed = false;      // Lysa — survive one lethal hit at 1 HP
+	bool bCardRerollUsed = false;      // Mira — reroll one card reward
 };
 
 UCLASS()
@@ -127,6 +131,14 @@ public:
 	// Artifact "GoldBar": multiplies Echoes income while owned.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Artifacts")
 	float GoldBarEchoesMultiplier = 1.1f;
+
+	// Run relic "BerserkerFetish": outgoing damage x this while the player's HP is at/under the
+	// threshold. Bespoke HasRunArtifact hook (applied in AEnemyBase::TakeDamageFromPlayer).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Artifacts")
+	float BerserkerDamageMult = 1.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Artifacts")
+	float BerserkerHPThreshold = 0.3f;
 
 	// Console test-grant: open the ~ console and type e.g. "GrantArtifactCheat Wing".
 	UFUNCTION(Exec)
@@ -250,6 +262,15 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Curses")
 	float CurseMarkedEnemySpeedMult = 1.4f;// "Marked"   — enemy move speed x this
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Curses")
+	float CurseWeaknessDamageMult = 0.75f; // "Weakness" — YOUR outgoing damage x this
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Curses")
+	float CurseVolatileSelfDamage = 10.0f; // "Volatile" — enemy death pops also hit YOU for this within the pop radius
+
+	// ("Static" — card effects only fire every other landed hit — has no magnitude; the
+	//  hit-parity logic lives in ALoopedCharacter::OnPlayerHitEnemy.)
 
 	// Card-reward choices to offer. Base 3, + permanent vault bonus, - 1 if "Scarcity" cursed.
 	// The card-reward Blueprint should read this when building the offer.
@@ -386,6 +407,11 @@ public:
 	// Card definition row by id (nullptr if missing / table unset).
 	const FPassiveCardData* FindCardRow(FName CardId) const;
 
+	// Per-level tuning row for an EQUIPPED card at its effective level (Brittle curse = one tier
+	// weaker, min 1). Null if the card isn't equipped / has no data. Single source for every
+	// effect that reads card magnitudes (character hit chain, weapon crit roll, ...).
+	const FPassiveCardLevel* GetEffectiveLevelData(FName CardId) const;
+
 	UFUNCTION(BlueprintPure, Category = "LOOPED|Deck")
 	UDataTable* GetCardTable() const { return CardTable; }
 
@@ -423,6 +449,29 @@ public:
 	float GetRunHealth() const { return CurrentRunState.CurrentHealth; }
 	float GetRunMaxHealth() const { return CurrentRunState.MaxHealth; }
 	bool IsRunHealthInitialized() const { return CurrentRunState.bHealthInitialized; }
+
+	// --- Rescued-companion relic tokens (once per run; see looped_rescue_system.md) ---
+	// Lysa "Second Wind": the Character consumes this when a lethal hit is survived at 1 HP.
+	bool IsSecondWindUsed() const { return CurrentRunState.bSecondWindUsed; }
+	void MarkSecondWindUsed() { CurrentRunState.bSecondWindUsed = true; }
+
+	// Mira "Reroll": the card-draft UI shows a reroll button while this is true (R3 wires the UI).
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Artifacts")
+	bool CanUseCardReroll() const { return HasArtifact(TEXT("Mira")) && !CurrentRunState.bCardRerollUsed; }
+
+	// Consumes the reroll token. Returns false (and does nothing) if it isn't available.
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Artifacts")
+	bool ConsumeCardReroll()
+	{
+		if (!CanUseCardReroll()) return false;
+		CurrentRunState.bCardRerollUsed = true;
+		return true;
+	}
+
+	// "Void Vigor" — merchant-bought +max HP for THIS run only (folded into the Character's
+	// ApplyMaxHPMod). Public accessors so callers never touch the private run state directly.
+	int32 GetRunBonusMaxHP() const { return CurrentRunState.RunBonusMaxHP; }
+	void AddRunBonusMaxHP(int32 Amount) { CurrentRunState.RunBonusMaxHP += Amount; }
 
 	// Full new-run wipe: clears the run deck AND the run state (health flag, shards, curses).
 	// Called on Hub entry. Echoes / artifacts / unlocks (the save) are deliberately untouched.

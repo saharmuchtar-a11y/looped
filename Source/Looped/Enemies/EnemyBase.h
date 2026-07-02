@@ -82,6 +82,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|Enemy")
 	void ApplyLifestealEffect(float HealAmount = 5.0f);
 
+	// Frostbite card: each hit adds a chill stack; at ChillStacksToFreeze the enemy freezes solid
+	// (no movement, no AI, no shots) for FreezeDuration seconds. Stacks decay if not refreshed.
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Enemy")
+	void ApplyCryoEffect(float FreezeDuration);
+
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Enemy")
+	bool IsFrozen() const { return bFrozen; }
+
 	virtual void Tick(float DeltaTime) override;
 
 protected:
@@ -453,6 +461,22 @@ private:
 	int32 VenomTicksRemaining = 0;
 	float VenomSlowMultiplier = 1.0f;
 	float BaseSpeed = 0.0f;
+
+	// --- Frostbite (chill → freeze) state ---
+	// Stacks required to freeze and how long unrefreshed stacks last. Editable per enemy so heavy
+	// archetypes can be made freeze-resistant later without code.
+	UPROPERTY(EditAnywhere, Category = "LOOPED|Combat")
+	int32 ChillStacksToFreeze = 3;
+
+	UPROPERTY(EditAnywhere, Category = "LOOPED|Combat")
+	float ChillStackDecaySeconds = 4.0f;
+
+	int32 ChillStacks = 0;
+	bool bFrozen = false;
+	FTimerHandle FreezeTimerHandle;
+	FTimerHandle ChillDecayTimerHandle;
+	void EndFreeze();
+	void DecayChillStacks();
 
 	// AI state machine
 	float StateTimer = 0.0f;

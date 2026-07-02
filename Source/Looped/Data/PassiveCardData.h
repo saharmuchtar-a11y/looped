@@ -31,6 +31,10 @@ struct FPassiveCardLevel
 	UPROPERTY(EditAnywhere, BlueprintReadOnly) float MoveSpeedBonus = 0.0f; // speed perk (+fraction, e.g. 0.10 = +10%)
 	UPROPERTY(EditAnywhere, BlueprintReadOnly) float GravityScale   = 1.0f; // gravity perk (multiplier)
 	UPROPERTY(EditAnywhere, BlueprintReadOnly) float FlatMaxHP      = 0.0f; // maxhp perk (+flat HP)
+	UPROPERTY(EditAnywhere, BlueprintReadOnly) float CritChance     = 0.0f; // deadeye: 0..1 chance a weapon hit crits
+	UPROPERTY(EditAnywhere, BlueprintReadOnly) float CritMultiplier = 2.0f; // deadeye: damage x on a crit
+	UPROPERTY(EditAnywhere, BlueprintReadOnly) float FreezeDuration = 0.0f; // frostbite: seconds frozen solid at full chill stacks
+	UPROPERTY(EditAnywhere, BlueprintReadOnly) int32 EchoInterval   = 0;    // echo: every Nth hit re-triggers the effect chain
 };
 
 // Card/perk definition. The DataTable ROW NAME is the canonical perk id (e.g. "BurnShot",

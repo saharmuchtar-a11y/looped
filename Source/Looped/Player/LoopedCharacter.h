@@ -113,10 +113,29 @@ public:
 	void OnPlayerHitEnemy(AEnemyBase* Enemy);
 
 private:
-	// Applies burn / venom / lifesteal heal to a single target. Does NOT recurse into chain.
+	// Applies burn / venom / lifesteal heal / cryo to a single target. Does NOT recurse into chain.
 	void ApplyEquippedEffectsTo(AEnemyBase* Target);
 
+	// One full pass of the per-hit effect chain: equipped effects on the target + the ChainSpark
+	// propagation. Extracted so the Echo card can re-run the whole chain on its Nth hit.
+	void ApplyHitEffectsChain(AEnemyBase* Enemy, class ULoopedGameInstance* GI);
+
+	// --- Per-hit counters (pawn-local; the pawn is rebuilt each room, so they reset per room) ---
+	int32 EchoHitCounter = 0;        // Echo card — counts hits toward the next chain re-trigger
+	int32 StaticCurseHitCounter = 0; // "Static" curse — odd hits fire card effects, even hits fizzle
+	int32 CapacitorHitCounter = 0;   // StaticCapacitor relic — counts hits toward the next spark pulse
+
 public:
+	// Run relic "StaticCapacitor": every CapacitorHitInterval-th landed hit emits a free spark
+	// pulse (reuses the enemy ChainSpark AoE). Tunables, no code change to rebalance.
+	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|Artifacts")
+	int32 CapacitorHitInterval = 8;
+
+	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|Artifacts")
+	float CapacitorPulseDamage = 10.0f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|Artifacts")
+	float CapacitorPulseRadius = 500.0f;
 
 	// Re-derive walk speed + gravity scale from Speed/Gravity levels. Call from BP after card pick.
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|Perks")
@@ -308,6 +327,11 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|Artifacts")
 	float WingGravityBase = 0.85f;
 
+	// Brann "Forged Plate" (rescued-companion relic): all incoming damage is multiplied by this
+	// while Brann is rescued. The ONLY flat damage-reduction in the game — keep it unique.
+	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|Artifacts")
+	float BrannPlateDamageMult = 0.9f;
+
 	UPROPERTY(EditDefaultsOnly, Category = "Movement")
 	float JumpHeight = 150.0f;
 
@@ -415,4 +439,11 @@ private:
 	int32 StatusBurnTicksRemaining = 0;
 	FTimerHandle StatusBurnTimerHandle;
 	void StatusBurnTick();
+
+	// Void "Weaken": incoming damage is multiplied by this (1.0 = none) for a duration — the void
+	// unravels your defenses. Applied in TakeDamageFromEnemy alongside the Frailty curse; the timer
+	// restores it to 1.0. Re-application refreshes (no stacking).
+	float StatusWeakenMultiplier = 1.0f;
+	FTimerHandle StatusWeakenTimerHandle;
+	void EndStatusWeaken();
 };

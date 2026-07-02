@@ -429,6 +429,27 @@ void ALoopedCharacter::TakeDamageFromEnemy(float Damage)
 		}
 	}
 
+	// Void "Weaken" status: amplify incoming damage while active (1.0 = no effect).
+	Damage *= StatusWeakenMultiplier;
+
+	// --- Rescued-companion relics (permanent, unique — see looped_rescue_system.md) ---
+	if (ULoopedGameInstance* CompanionGI = GetGameInstance<ULoopedGameInstance>())
+	{
+		// Brann "Forged Plate": take less damage, always.
+		if (CompanionGI->HasArtifact(TEXT("Brann")))
+		{
+			Damage *= BrannPlateDamageMult;
+		}
+		// Lysa "Second Wind": once per run, a lethal hit leaves you at 1 HP instead of killing you.
+		if (Damage >= POCCurrentHealth && CompanionGI->HasArtifact(TEXT("Lysa")) && !CompanionGI->IsSecondWindUsed())
+		{
+			CompanionGI->MarkSecondWindUsed();
+			Damage = POCCurrentHealth - 1.0f;
+			ShowCenterMessage(FText::FromString(TEXT("LYSA PULLS YOU BACK — second wind!")), 2.5f);
+			UE_LOG(LogLoopedCore, Display, TEXT("[Companion] Second Wind consumed — lethal hit survived at 1 HP."));
+		}
+	}
+
 	const float OldHP = POCCurrentHealth;
 	POCCurrentHealth = FMath::Max(0.0f, POCCurrentHealth - Damage);
 	OnPlayerHealthChanged.Broadcast(GetPOCHealthPercent());
@@ -1015,22 +1036,12 @@ void ALoopedCharacter::Tick(float DeltaSeconds)
 // Per-level tuning + caps moved to the FPassiveCardData DataTable (data consolidation).
 // Effects read their numbers from the equipped card's row (via GameInstance RunDeck).
 
-// Effective level under the "Brittle" curse (one tier weaker, min 1).
-static int32 BrittleLevel(const ULoopedGameInstance* GI, int32 Level)
-{
-	return (GI && GI->HasCurse(TEXT("Brittle"))) ? FMath::Max(1, Level - 1) : Level;
-}
-
-// Fetch the per-level tuning row for an equipped card at its (Brittle-adjusted) level. Null if not equipped / no data.
+// Fetch the per-level tuning row for an equipped card at its (Brittle-adjusted) level. Null if not
+// equipped / no data. (Brittle logic now lives in the GameInstance so other systems — e.g. the
+// weapon crit roll — read the exact same effective level.)
 static const FPassiveCardLevel* GetLevelData(const ULoopedGameInstance* GI, FName CardId)
 {
-	if (!GI) return nullptr;
-	const int32 Level = GI->GetCardLevel(CardId);
-	if (Level <= 0) return nullptr;
-	const FPassiveCardData* Row = GI->FindCardRow(CardId);
-	if (!Row) return nullptr;
-	const int32 Eff = BrittleLevel(GI, Level);
-	return Row->Levels.IsValidIndex(Eff - 1) ? &Row->Levels[Eff - 1] : nullptr;
+	return GI ? GI->GetEffectiveLevelData(CardId) : nullptr;
 }
 
 int32 ALoopedCharacter::IncrementPerkLevel(FName PerkName)
@@ -1077,7 +1088,7 @@ void ALoopedCharacter::ApplyMaxHPMod()
 		if (const FPassiveCardLevel* Lv = GetLevelData(GI, TEXT("MaxHP"))) Bonus += Lv->FlatMaxHP;
 		Bonus += (float)GI->GetPermanentBonusMaxHP();
 		Bonus += GI->GetArtifactFlatMaxHP(); // run relics (Bloodstone +25)
-		Bonus += (float)GI->CurrentRunState.RunBonusMaxHP; // Void Vigor cache purchases (this run)
+		Bonus += (float)GI->GetRunBonusMaxHP(); // Void Vigor cache purchases (this run)
 	}
 	POCMaxHealth = 100.0f + Bonus;
 	const float Delta = POCMaxHealth - OldMax;
@@ -1144,6 +1155,7 @@ void ALoopedCharacter::ApplyEquippedEffectsTo(AEnemyBase* Target)
 	const FGameplayTag TagBurn      = FGameplayTag::RequestGameplayTag(FName("Effect.Burn"), false);
 	const FGameplayTag TagVenom     = FGameplayTag::RequestGameplayTag(FName("Effect.Venom"), false);
 	const FGameplayTag TagLifesteal = FGameplayTag::RequestGameplayTag(FName("Effect.Lifesteal"), false);
+	const FGameplayTag TagCryo      = FGameplayTag::RequestGameplayTag(FName("Effect.Cryo"), false);
 
 	for (const FPassiveSlot& Slot : GI->RunDeck)
 	{
@@ -1155,17 +1167,14 @@ void ALoopedCharacter::ApplyEquippedEffectsTo(AEnemyBase* Target)
 		if (CardTags.HasTagExact(TagBurn))           Target->ApplyBurnEffect(Lv->Damage, Lv->Ticks);
 		else if (CardTags.HasTagExact(TagVenom))     Target->ApplyVenomEffect(Lv->Damage, Lv->Ticks, Lv->SlowMultiplier);
 		else if (CardTags.HasTagExact(TagLifesteal)) HealPlayer(Lv->HealAmount);
-		// Speed/Gravity/MaxHP are passive (movement/HP). ChainSpark is handled in OnPlayerHitEnemy.
+		else if (CardTags.HasTagExact(TagCryo))      Target->ApplyCryoEffect(Lv->FreezeDuration);
+		// Speed/Gravity/MaxHP are passive (movement/HP). ChainSpark is handled in the hit chain;
+		// Echo (chain re-trigger) and Deadeye (weapon crit) don't dispatch per-target here.
 	}
 }
 
-void ALoopedCharacter::OnPlayerHitEnemy(AEnemyBase* Enemy)
+void ALoopedCharacter::ApplyHitEffectsChain(AEnemyBase* Enemy, ULoopedGameInstance* GI)
 {
-	if (!Enemy || !Enemy->IsAlive()) return;
-
-	ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>();
-	if (!GI) return;
-
 	// Primary hit: apply all equipped on-hit effects to the directly-hit enemy.
 	ApplyEquippedEffectsTo(Enemy);
 
@@ -1187,6 +1196,45 @@ void ALoopedCharacter::OnPlayerHitEnemy(AEnemyBase* Enemy)
 				Other->TakeDamageFromPlayer(ChainDamage, this);
 				ApplyEquippedEffectsTo(Other);
 			}
+		}
+	}
+}
+
+void ALoopedCharacter::OnPlayerHitEnemy(AEnemyBase* Enemy)
+{
+	if (!Enemy || !Enemy->IsAlive()) return;
+
+	ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>();
+	if (!GI) return;
+
+	// Run relic "StaticCapacitor": every Nth landed hit discharges a free spark pulse around the
+	// target. A relic, not a card — deliberately NOT silenced by the Static curse below.
+	if (GI->HasRunArtifact(TEXT("StaticCapacitor")))
+	{
+		if (++CapacitorHitCounter >= FMath::Max(1, CapacitorHitInterval))
+		{
+			CapacitorHitCounter = 0;
+			Enemy->ApplyChainSparkEffect(CapacitorPulseDamage, CapacitorPulseRadius);
+			UE_LOG(LogLoopedCore, Display, TEXT("[Relic] Static Capacitor discharged (%.0f dmg, %.0f radius)"), CapacitorPulseDamage, CapacitorPulseRadius);
+		}
+	}
+
+	// Curse "Static": card effects only fire on every other landed hit — off-beat hits fizzle.
+	if (GI->HasCurse(TEXT("Static")) && (++StaticCurseHitCounter % 2 == 0))
+	{
+		return;
+	}
+
+	ApplyHitEffectsChain(Enemy, GI);
+
+	// Echo card: every Nth hit re-triggers the whole effect chain once, so every proc lands twice.
+	if (const FPassiveCardLevel* EchoLv = GetLevelData(GI, TEXT("Echo")))
+	{
+		if (EchoLv->EchoInterval > 0 && ++EchoHitCounter >= EchoLv->EchoInterval)
+		{
+			EchoHitCounter = 0;
+			ApplyHitEffectsChain(Enemy, GI);
+			UE_LOG(LogLoopedCore, Display, TEXT("[Card] Echo re-triggered the effect chain"));
 		}
 	}
 }
@@ -1374,12 +1422,30 @@ void ALoopedCharacter::ApplyElementalStatus(FName StatusEffect, float Magnitude,
 		}
 		UE_LOG(LogLoopedCore, Display, TEXT("Status %s applied: %.1f dmg/s x%d ticks"), *StatusEffect.ToString(), Magnitude, StatusBurnTicksRemaining);
 	}
+	else if (StatusEffect == TEXT("Weaken"))
+	{
+		// Magnitude = extra damage taken (0.3 = +30%). Void amplifies all incoming damage for a
+		// duration; clamp so data can't double you up beyond +100%. Re-application refreshes the clock.
+		const bool bWasWeak = StatusWeakenMultiplier > 1.0f;
+		StatusWeakenMultiplier = 1.0f + FMath::Clamp(Magnitude, 0.0f, 1.0f);
+		GetWorldTimerManager().SetTimer(StatusWeakenTimerHandle, this, &ALoopedCharacter::EndStatusWeaken, Duration, false);
+		if (!bWasWeak)
+		{
+			ShowCenterMessage(FText::FromString(TEXT("WEAKENED — you take more damage!")), 1.2f);
+		}
+		UE_LOG(LogLoopedCore, Display, TEXT("Status WEAKEN applied: x%.2f for %.1fs"), StatusWeakenMultiplier, Duration);
+	}
 }
 
 void ALoopedCharacter::EndStatusSlow()
 {
 	StatusSlowMultiplier = 1.0f;
 	ApplyMovementMods();
+}
+
+void ALoopedCharacter::EndStatusWeaken()
+{
+	StatusWeakenMultiplier = 1.0f;
 }
 
 void ALoopedCharacter::StatusBurnTick()

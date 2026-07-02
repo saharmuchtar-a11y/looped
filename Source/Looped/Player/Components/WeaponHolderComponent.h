@@ -63,6 +63,10 @@ private:
 	void PerformMeleeAttack();
 	void PerformHitscanAttack();
 
+	// Damage for one landed hit: weapon base x global multiplier, plus the Deadeye card's crit
+	// roll (per target). bOutCrit reports whether this hit critted (for feedback/logging).
+	float ComputeAttackDamage(bool& bOutCrit) const;
+
 	// Loads CachedWeaponData.WeaponMesh and shows it on the owning hero's hand socket (none = hides it).
 	void ApplyWeaponVisual();
 

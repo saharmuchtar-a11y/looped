@@ -3,6 +3,8 @@
 #include "Enemies/EnemyBase.h"
 #include "Enemies/SimpleEnemy.h"
 #include "Player/LoopedCharacter.h"
+#include "Core/LoopedGameInstance.h"
+#include "Data/PassiveCardData.h"
 #include "Looped.h"
 #include "Engine/World.h"
 #include "Kismet/GameplayStatics.h"
@@ -139,6 +141,30 @@ void UWeaponHolderComponent::FireWeapon()
 	}
 }
 
+float UWeaponHolderComponent::ComputeAttackDamage(bool& bOutCrit) const
+{
+	bOutCrit = false;
+	float OutDamage = CachedWeaponData.BaseDamage * DamageMultiplier;
+
+	// Deadeye card: chance for this hit to crit, values from the equipped card's per-level row
+	// (Brittle-adjusted via GetEffectiveLevelData — same source as every other card effect).
+	if (const UWorld* World = GetWorld())
+	{
+		if (const ULoopedGameInstance* GI = World->GetGameInstance<ULoopedGameInstance>())
+		{
+			if (const FPassiveCardLevel* Lv = GI->GetEffectiveLevelData(TEXT("Deadeye")))
+			{
+				if (Lv->CritChance > 0.0f && FMath::FRand() < Lv->CritChance)
+				{
+					OutDamage *= FMath::Max(1.0f, Lv->CritMultiplier);
+					bOutCrit = true;
+				}
+			}
+		}
+	}
+	return OutDamage;
+}
+
 void UWeaponHolderComponent::PerformMeleeAttack()
 {
 	AActor* Owner = GetOwner();
@@ -172,7 +198,8 @@ void UWeaponHolderComponent::PerformMeleeAttack()
 
 			OnWeaponHit.Broadcast(Hit);
 
-			const float OutDamage = CachedWeaponData.BaseDamage * DamageMultiplier;
+			bool bCrit = false;
+			const float OutDamage = ComputeAttackDamage(bCrit);
 
 			// Apply damage to enemy (check both types)
 			AEnemyBase* Enemy = Cast<AEnemyBase>(HitActor);
@@ -193,8 +220,8 @@ void UWeaponHolderComponent::PerformMeleeAttack()
 				CachedPassiveStack->EvaluatePassives(Hit, CachedWeaponData.PrimaryFamily, HitActor);
 			}
 
-			UE_LOG(LogLoopedWeapons, Display, TEXT("Melee hit: %s for %.1f damage"),
-				*HitActor->GetName(), OutDamage);
+			UE_LOG(LogLoopedWeapons, Display, TEXT("Melee hit: %s for %.1f damage%s"),
+				*HitActor->GetName(), OutDamage, bCrit ? TEXT(" (CRIT)") : TEXT(""));
 		}
 	}
 
@@ -232,7 +259,8 @@ void UWeaponHolderComponent::PerformHitscanAttack()
 
 		OnWeaponHit.Broadcast(Hit);
 
-		const float OutDamage = CachedWeaponData.BaseDamage * DamageMultiplier;
+		bool bCrit = false;
+		const float OutDamage = ComputeAttackDamage(bCrit);
 
 		AEnemyBase* Enemy = Cast<AEnemyBase>(HitActor);
 		if (Enemy)
@@ -245,7 +273,7 @@ void UWeaponHolderComponent::PerformHitscanAttack()
 			CachedPassiveStack->EvaluatePassives(Hit, CachedWeaponData.PrimaryFamily, HitActor);
 		}
 
-		UE_LOG(LogLoopedWeapons, Display, TEXT("Hitscan hit: %s for %.1f damage"),
-			*HitActor->GetName(), OutDamage);
+		UE_LOG(LogLoopedWeapons, Display, TEXT("Hitscan hit: %s for %.1f damage%s"),
+			*HitActor->GetName(), OutDamage, bCrit ? TEXT(" (CRIT)") : TEXT(""));
 	}
 }

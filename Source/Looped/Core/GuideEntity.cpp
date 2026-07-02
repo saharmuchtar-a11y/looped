@@ -249,7 +249,8 @@ FString AGuideEntity::BuildPage(int32 PageIndex) const
 		if (GI)
 		{
 			static const TCHAR* CurseIds[] = { TEXT("Tithe"), TEXT("Frailty"), TEXT("Bloodless"), TEXT("Leaden"),
-				TEXT("Decay"), TEXT("Marked"), TEXT("Dimmed"), TEXT("Brittle"), TEXT("Scarcity") };
+				TEXT("Decay"), TEXT("Marked"), TEXT("Dimmed"), TEXT("Brittle"), TEXT("Scarcity"),
+				TEXT("Weakness"), TEXT("Volatile"), TEXT("Static") };
 			for (const TCHAR* Id : CurseIds)
 			{
 				if (GI->IsCurseSeen(FName(Id)))

@@ -275,6 +275,9 @@ FText ULoopedGameInstance::GetCurseDescription(FName Curse) const
 	if (Curse == TEXT("Brittle"))   return FText::FromString(TEXT("your cards act one level weaker"));
 	if (Curse == TEXT("Scarcity"))  return FText::FromString(TEXT("one fewer card choice"));
 	if (Curse == TEXT("Dimmed"))    return FText::FromString(TEXT("the world goes dark around you"));
+	if (Curse == TEXT("Weakness"))  return FText::FromString(TEXT("you deal 25% less damage"));
+	if (Curse == TEXT("Volatile"))  return FText::FromString(TEXT("dying enemies detonate against you too"));
+	if (Curse == TEXT("Static"))    return FText::FromString(TEXT("your cards only fire every other hit"));
 	return FText::GetEmpty();
 }
 
@@ -872,6 +875,17 @@ const FPassiveCardData* ULoopedGameInstance::FindCardRow(FName CardId) const
 {
 	if (!CardTable) return nullptr;
 	return CardTable->FindRow<FPassiveCardData>(CanonCardId(CardId), TEXT("FindCardRow"), /*bWarnIfMissing*/false);
+}
+
+const FPassiveCardLevel* ULoopedGameInstance::GetEffectiveLevelData(FName CardId) const
+{
+	const int32 Level = GetCardLevel(CardId);
+	if (Level <= 0) return nullptr;
+	const FPassiveCardData* Row = FindCardRow(CardId);
+	if (!Row) return nullptr;
+	// Curse "Brittle": every card acts one level weaker (min 1).
+	const int32 Eff = HasCurse(TEXT("Brittle")) ? FMath::Max(1, Level - 1) : Level;
+	return Row->Levels.IsValidIndex(Eff - 1) ? &Row->Levels[Eff - 1] : nullptr;
 }
 
 int32 ULoopedGameInstance::GetCardLevel(FName CardId) const

@@ -298,6 +298,9 @@ void AEnemyBase::Tick(float DeltaTime)
 
 	if (!IsAlive()) return;
 
+	// Frostbite: frozen solid — no AI, no movement, no attacks until the thaw timer fires.
+	if (bFrozen) return;
+
 	APlayerController* PC = GetWorld()->GetFirstPlayerController();
 	if (!PC) return;
 	APawn* Player = PC->GetPawn();
@@ -709,11 +712,13 @@ void AEnemyBase::RefreshColor()
 	// burn > frenzy. Hit-flash RED outranks everything so a player hit always reads.
 	FLinearColor Glow = FLinearColor::Black;
 	if (bHitFlashing)                                   Glow = FLinearColor(5.0f, 0.0f, 0.0f, 1.0f); // bright red hit
+	else if (bFrozen)                                   Glow = FLinearColor(0.3f, 1.8f, 4.5f, 1.0f); // frozen solid — icy HDR blue
 	else if (AIState == EEnemyAIState::TeleportWindup)  Glow = TeleportWindupColor;
 	else if (AIState == EEnemyAIState::SpecialWindup)   Glow = SpecialWindupColor;
 	else if (AIState == EEnemyAIState::Windup)          Glow = WindupColor;
 	else if (bTelegraphInFlight)                        Glow = TelegraphColor;
 	else if (BurnTicksRemaining > 0)                    Glow = FLinearColor(1.5f, 0.45f, 0.0f, 1.0f);
+	else if (ChillStacks > 0)                           Glow = FLinearColor(0.1f, 0.7f, 1.8f, 1.0f); // chill building toward freeze
 	else if (bIsFrenzied)                               Glow = FrenzyColor;
 
 	OverlayMID->SetVectorParameterValue(TEXT("OverlayColor"), Glow);
@@ -748,6 +753,13 @@ void AEnemyBase::PlayAttackAnim()
 
 void AEnemyBase::RefreshSpeed()
 {
+	// Frostbite: frozen solid = zero speed. Recomputed normally on thaw (EndFreeze calls again).
+	if (bFrozen)
+	{
+		GetCharacterMovement()->MaxWalkSpeed = 0.0f;
+		return;
+	}
+
 	float S = BaseSpeed;
 	if (bIsFrenzied)                              S *= FrenzySpeedMultiplier;
 	else if (bIsAlerted)                          S *= AlertedSpeedMultiplier;
@@ -777,10 +789,28 @@ void AEnemyBase::TakeDamageFromPlayer(float Damage, AActor* DamageSource)
 	if (!IsAlive()) return;
 
 	// Run-relic outgoing damage multiplier (Ember Core 1.40). Single chokepoint for ALL
-	// player-dealt damage (base hit + ChainSpark).
+	// player-dealt damage (base hit + ChainSpark + DoT ticks).
 	if (const ULoopedGameInstance* PlayerGI = GetGameInstance<ULoopedGameInstance>())
 	{
 		Damage *= PlayerGI->GetArtifactDamageMult();
+
+		// Curse "Weakness": the player's outgoing damage is dulled this run.
+		if (PlayerGI->HasCurse(TEXT("Weakness")))
+		{
+			Damage *= PlayerGI->CurseWeaknessDamageMult;
+		}
+
+		// Run relic "BerserkerFetish": hit harder while near death (bespoke hook, like Wing/GoldBar).
+		if (PlayerGI->HasRunArtifact(TEXT("BerserkerFetish")))
+		{
+			if (const ALoopedCharacter* LC = Cast<ALoopedCharacter>(UGameplayStatics::GetPlayerCharacter(this, 0)))
+			{
+				if (LC->GetPOCHealthPercent() <= PlayerGI->BerserkerHPThreshold)
+				{
+					Damage *= PlayerGI->BerserkerDamageMult;
+				}
+			}
+		}
 	}
 
 	const float OldHealth = CurrentHealth;
@@ -867,6 +897,8 @@ void AEnemyBase::Die()
 	GetWorldTimerManager().ClearTimer(SpecialBurstTimerHandle);
 	GetWorldTimerManager().ClearTimer(TeleportTimerHandle);
 	GetWorldTimerManager().ClearTimer(MeleeModeTimerHandle);
+	GetWorldTimerManager().ClearTimer(FreezeTimerHandle);
+	GetWorldTimerManager().ClearTimer(ChillDecayTimerHandle);
 	bTelegraphInFlight = false;
 	SpecialShotsRemaining = 0;
 	GetCharacterMovement()->DisableMovement();
@@ -940,8 +972,12 @@ void AEnemyBase::Respawn()
 	GetWorldTimerManager().ClearTimer(SpecialBurstTimerHandle);
 	GetWorldTimerManager().ClearTimer(TeleportTimerHandle);
 	GetWorldTimerManager().ClearTimer(MeleeModeTimerHandle);
+	GetWorldTimerManager().ClearTimer(FreezeTimerHandle);
+	GetWorldTimerManager().ClearTimer(ChillDecayTimerHandle);
 	BurnTicksRemaining = 0;
 	VenomTicksRemaining = 0;
+	ChillStacks = 0;
+	bFrozen = false;
 	SpecialShotsRemaining = 0;
 	NextSpecialReadyTime = 0.0f;
 	NextTeleportReadyTime = 0.0f;
@@ -1077,6 +1113,46 @@ void AEnemyBase::VenomTick()
 	RefreshSpeed();
 }
 
+void AEnemyBase::ApplyCryoEffect(float FreezeDuration)
+{
+	if (!IsAlive()) return;
+	if (bFrozen) return; // no freeze-lock chaining — chill only counts again after the thaw
+
+	ChillStacks++;
+	// Stacks decay if not refreshed: chill pressure must be sustained to reach the freeze.
+	GetWorldTimerManager().SetTimer(ChillDecayTimerHandle, this, &AEnemyBase::DecayChillStacks, FMath::Max(0.1f, ChillStackDecaySeconds), false);
+
+	if (ChillStacks < ChillStacksToFreeze)
+	{
+		RefreshColor();
+		UE_LOG(LogLoopedAI, Display, TEXT("Chill stack %d/%d"), ChillStacks, ChillStacksToFreeze);
+		return;
+	}
+
+	// Full stacks: frozen solid. Tick early-outs while bFrozen, so all AI/attacks stop.
+	ChillStacks = 0;
+	bFrozen = true;
+	GetWorldTimerManager().ClearTimer(ChillDecayTimerHandle);
+	GetCharacterMovement()->StopMovementImmediately();
+	RefreshSpeed();
+	RefreshColor();
+	GetWorldTimerManager().SetTimer(FreezeTimerHandle, this, &AEnemyBase::EndFreeze, FMath::Max(0.1f, FreezeDuration), false);
+	UE_LOG(LogLoopedAI, Display, TEXT("Enemy FROZEN for %.1fs"), FreezeDuration);
+}
+
+void AEnemyBase::EndFreeze()
+{
+	bFrozen = false;
+	RefreshSpeed();
+	RefreshColor();
+}
+
+void AEnemyBase::DecayChillStacks()
+{
+	ChillStacks = 0;
+	RefreshColor();
+}
+
 void AEnemyBase::MeleeCooldownReset()
 {
 	bCanMeleeHit = true;
@@ -1097,6 +1173,8 @@ void AEnemyBase::RangedAttack()
 
 void AEnemyBase::SpawnProjectileAtPlayer(float Damage)
 {
+	if (bFrozen) return; // an in-flight telegraph/burst timer must not fire from a frozen enemy
+
 	APawn* Player = GetWorld()->GetFirstPlayerController() ? GetWorld()->GetFirstPlayerController()->GetPawn() : nullptr;
 	if (!Player) return;
 
@@ -1435,6 +1513,22 @@ void AEnemyBase::DeathPop()
 		{
 			Other->TakeDamageFromPlayer(DeathPopDamage, this);
 			UE_LOG(LogLoopedAI, Display, TEXT("Death pop hit ally for %.0f (dist %.0f)"), DeathPopDamage, D);
+		}
+	}
+
+	// Curse "Volatile": the death pop also detonates against the PLAYER — melee kills turn risky.
+	if (const ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
+	{
+		if (GI->HasCurse(TEXT("Volatile")))
+		{
+			if (ALoopedCharacter* LC = Cast<ALoopedCharacter>(UGameplayStatics::GetPlayerCharacter(this, 0)))
+			{
+				if (FVector::Dist(MyLoc, LC->GetActorLocation()) <= DeathPopRadius)
+				{
+					LC->TakeDamageFromEnemy(GI->CurseVolatileSelfDamage);
+					UE_LOG(LogLoopedAI, Display, TEXT("Volatile death pop hit the PLAYER for %.0f"), GI->CurseVolatileSelfDamage);
+				}
+			}
 		}
 	}
 }
