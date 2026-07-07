@@ -35,6 +35,11 @@ struct FPassiveCardLevel
 	UPROPERTY(EditAnywhere, BlueprintReadOnly) float CritMultiplier = 2.0f; // deadeye: damage x on a crit
 	UPROPERTY(EditAnywhere, BlueprintReadOnly) float FreezeDuration = 0.0f; // frostbite: seconds frozen solid at full chill stacks
 	UPROPERTY(EditAnywhere, BlueprintReadOnly) int32 EchoInterval   = 0;    // echo: every Nth hit re-triggers the effect chain
+	// Generic percent knob (0.10 = +10%). Interpreted by the card's mechanic: Rupture/Executioner/
+	// HuntersMark/Overcharge/GlassCannon damage bonus, Momentum speed burst, etc.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly) float Fraction       = 0.0f;
+	// Generic threshold fraction (0.25 = 25%). Interpreted by the mechanic (Executioner HP gate).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly) float Threshold      = 0.0f;
 };
 
 // Card/perk definition. The DataTable ROW NAME is the canonical perk id (e.g. "BurnShot",

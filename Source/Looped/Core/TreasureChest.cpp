@@ -153,10 +153,21 @@ void ATreasureChest::PushOfferTextToWidget()
 void ATreasureChest::OnOverlapBegin(UPrimitiveComponent* /*OverlappedComp*/, AActor* OtherActor,
 	UPrimitiveComponent* /*OtherComp*/, int32 /*OtherBodyIndex*/, bool /*bFromSweep*/, const FHitResult& /*SweepResult*/)
 {
+	// Walk-in no longer CLAIMS (that's the deliberate press-E in Interact) — it only refreshes
+	// the locked state so a pedestal approached after the budget is spent relabels immediately.
 	if (bTaken || bLocked || !OtherActor) return;
 	const APawn* Pawn = Cast<APawn>(OtherActor);
 	if (!Pawn || !Pawn->IsPlayerControlled()) return;
 
+	ULoopedGameInstance* GI = GetWorld() ? GetWorld()->GetGameInstance<ULoopedGameInstance>() : nullptr;
+	if (!GI) return;
+
+	if (!GI->CanPickTreasure()) { LockPedestal(); }
+}
+
+void ATreasureChest::Interact(ALoopedCharacter* Player)
+{
+	if (bTaken || bLocked) return;
 	ULoopedGameInstance* GI = GetWorld() ? GetWorld()->GetGameInstance<ULoopedGameInstance>() : nullptr;
 	if (!GI) return;
 

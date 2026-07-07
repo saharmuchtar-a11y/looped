@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Core/LoopedInteractable.h"
 #include "GuideEntity.generated.h"
 
 class USphereComponent;
@@ -14,12 +15,20 @@ class UUserWidget;
 // Walk up to him and a BOOK opens: Cards / Enemies / Curses / Blessings / Relics — every page
 // generated from the live data tables, so the guide can never go stale.
 UCLASS(Blueprintable)
-class LOOPED_API AGuideEntity : public AActor
+class LOOPED_API AGuideEntity : public AActor, public ILoopedInteractable
 {
 	GENERATED_BODY()
 
 public:
 	AGuideEntity();
+
+	// Press-E to open the logbook — walking past no longer pops it.
+	virtual void Interact(class ALoopedCharacter* Player) override;
+	virtual float GetInteractRange() const override { return TriggerRadius + 40.0f; }
+	virtual FText GetInteractPrompt() const override
+	{
+		return bOpen ? FText::GetEmpty() : FText::FromString(TEXT("read the logbook"));
+	}
 
 	// Display name shown as the book's author line. Lore-derived; rename freely.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Guide")

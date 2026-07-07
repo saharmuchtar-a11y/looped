@@ -10,17 +10,22 @@
 #include "Enemies/EnemyBase.h"
 #include "EngineUtils.h"
 #include "Core/LoopedGameInstance.h"
+#include "Core/LoopedInteractable.h"
 #include "Core/LoopedRunGameMode.h"
 #include "Data/PassiveCardData.h"
+#include "Data/EnemyVisualData.h"
 #include "SloMo/SloMoManager.h"
+#include "Components/ProgressBar.h"
 #include "InputAction.h"
 #include "Looped.h"
 #include "Blueprint/UserWidget.h"
 #include "UObject/ConstructorHelpers.h"
 #include "TimerManager.h"
 #include "Components/TextBlock.h"
+#include "Components/Button.h"
 #include "Components/CanvasPanelSlot.h"
 #include "Components/PanelWidget.h"
+#include "Components/VerticalBox.h"
 #include "Components/VerticalBoxSlot.h"
 #include "Components/WidgetComponent.h"
 #include "GameFramework/PlayerController.h"
@@ -96,6 +101,20 @@ ALoopedCharacter::ALoopedCharacter()
 		SloMoAction = SloMoActionFinder.Object;
 	}
 
+	// Press-E interact — same auto-link pattern (mapped to E in IMC_Default).
+	static ConstructorHelpers::FObjectFinder<UInputAction> InteractActionFinder(TEXT("/Game/IA_Interact"));
+	if (InteractActionFinder.Succeeded())
+	{
+		InteractAction = InteractActionFinder.Object;
+	}
+
+	// Q skill — same auto-link pattern (mapped to Q in IMC_Default).
+	static ConstructorHelpers::FObjectFinder<UInputAction> SkillActionFinder(TEXT("/Game/IA_Skill"));
+	if (SkillActionFinder.Succeeded())
+	{
+		SkillAction = SkillActionFinder.Object;
+	}
+
 	// Arm-monitor dashboard — a viewport widget created on first open. Auto-link the class.
 	static ConstructorHelpers::FClassFinder<UUserWidget> WristWidgetClass(TEXT("/Game/UI/WBP_WristScreen"));
 	if (WristWidgetClass.Succeeded())
@@ -121,6 +140,91 @@ void ALoopedCharacter::PlayRandomAttackAnim()
 	{
 		AnimInst->PlaySlotAnimationAsDynamicMontage(Seq, FName(TEXT("DefaultSlot")), 0.1f, 0.1f, 1.0f);
 	}
+}
+
+void ALoopedCharacter::ApplyHeroVisual()
+{
+	if (HeroVisualRow.IsNone() || !GetMesh()) return;
+	UDataTable* VT = LoadObject<UDataTable>(nullptr, TEXT("/Game/Data/DT_EnemyVisuals.DT_EnemyVisuals"));
+	const FEnemyVisualSet* Row = VT ? VT->FindRow<FEnemyVisualSet>(HeroVisualRow, TEXT("HeroVisual"), false) : nullptr;
+	if (!Row) return;
+	USkeletalMesh* NewBody = Row->Mesh.LoadSynchronous();
+	if (!NewBody) return;
+
+	GetMesh()->SetSkeletalMesh(NewBody);
+	GetMesh()->SetAnimationMode(EAnimationMode::AnimationSingleNode);
+	GetMesh()->EmptyOverrideMaterials();
+	// Same fix as the enemies: always tick the pose (degenerate Meshy ref pose); bounds from live bones.
+	GetMesh()->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
+	GetMesh()->SetRelativeLocation(Row->MeshRelLocation);
+	GetMesh()->SetRelativeRotation(FRotator(0.0f, Row->MeshRelYaw, 0.0f));
+	GetMesh()->SetRelativeScale3D(FVector(Row->MeshScale));
+
+	HeroIdle   = Row->Idle.LoadSynchronous();
+	HeroWalk   = Row->Walk.LoadSynchronous();
+	HeroRun    = Row->Run.LoadSynchronous();
+	HeroAttack = Row->Attack.LoadSynchronous();
+	HeroCast   = Row->Cast.LoadSynchronous();
+	bHeroVisualDriven = true;
+
+	// FP head-clip fix again — the swap brought a fresh (un-hidden) head.
+	static const FName HeadBones[] = { FName(TEXT("Head")), FName(TEXT("head")) };
+	for (const FName& Bone : HeadBones)
+	{
+		if (GetMesh()->GetBoneIndex(Bone) != INDEX_NONE)
+		{
+			GetMesh()->HideBoneByName(Bone, EPhysBodyOp::PBO_None);
+			break;
+		}
+	}
+
+	// The rigs name their hands differently (Manny "hand_r", Meshy "RightHand") — auto-detect,
+	// then re-seat + renormalize the held weapon on the new bone.
+	if (!GetMesh()->DoesSocketExist(WeaponAttachSocket))
+	{
+		static const FName HandBones[] = { FName(TEXT("RightHand")), FName(TEXT("hand_r")), FName(TEXT("Hand_R")) };
+		for (const FName& Hand : HandBones)
+		{
+			if (GetMesh()->DoesSocketExist(Hand)) { WeaponAttachSocket = Hand; break; }
+		}
+	}
+	if (WeaponMeshComp)
+	{
+		WeaponMeshComp->AttachToComponent(GetMesh(), FAttachmentTransformRules::SnapToTargetNotIncludingScale, WeaponAttachSocket);
+		NormalizeWeaponTransform();
+	}
+
+	PlayHeroAnim(HeroIdle ? HeroIdle.Get() : HeroWalk.Get(), true);
+	UE_LOG(LogLoopedCore, Display, TEXT("[Hero] visual kit '%s' applied (weapon socket '%s')."),
+		*HeroVisualRow.ToString(), *WeaponAttachSocket.ToString());
+}
+
+void ALoopedCharacter::PlayHeroAnim(UAnimSequence* Anim, bool bLoop)
+{
+	if (!Anim || !GetMesh() || HeroCurrentAnim == Anim) return;
+	HeroCurrentAnim = Anim;
+	GetMesh()->PlayAnimation(Anim, bLoop);
+}
+
+void ALoopedCharacter::UpdateHeroAnim()
+{
+	if (!bHeroVisualDriven || !IsAlive()) return;
+	if (GetWorld() && GetWorld()->GetTimeSeconds() < HeroAttackHoldUntil) return; // swing playing
+	const float Speed = GetVelocity().Size2D();
+	if (Speed > 500.0f)     PlayHeroAnim(HeroRun ? HeroRun.Get() : HeroWalk.Get(), true);
+	else if (Speed > 60.0f) PlayHeroAnim(HeroWalk ? HeroWalk.Get() : HeroRun.Get(), true);
+	else                    PlayHeroAnim(HeroIdle ? HeroIdle.Get() : HeroWalk.Get(), true);
+}
+
+void ALoopedCharacter::PlayHeroAttackAnim(bool bMelee)
+{
+	if (!bHeroVisualDriven || !GetMesh()) return;
+	UAnimSequence* Swing = bMelee ? (HeroAttack ? HeroAttack.Get() : HeroCast.Get())
+	                              : (HeroCast ? HeroCast.Get() : HeroAttack.Get());
+	if (!Swing) return;
+	HeroCurrentAnim = Swing;
+	GetMesh()->PlayAnimation(Swing, false); // deliberate restart — every shot swings
+	HeroAttackHoldUntil = GetWorld()->GetTimeSeconds() + FMath::Min(Swing->GetPlayLength(), 0.9f);
 }
 
 void ALoopedCharacter::SetWeaponVisualMesh(UStaticMesh* NewMesh)
@@ -163,6 +267,16 @@ void ALoopedCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// Seed the chrono gauge from the run state (-1 = fresh run → start full).
+	if (const ULoopedGameInstance* SkillGI = GetGameInstance<ULoopedGameInstance>())
+	{
+		SkillGauge = SkillGI->GetRunSkillGauge();
+	}
+	if (SkillGauge < 0.0f)
+	{
+		SkillGauge = GetSkillGaugeMax();
+	}
+
 	// Cache the camera's rest position so the positional shake can jitter around it + snap back.
 	if (FirstPersonCamera)
 	{
@@ -184,6 +298,10 @@ void ALoopedCharacter::BeginPlay()
 			}
 		}
 	}
+
+	// The hero's real body (heronew Wanderer): mesh + anim kit + weapon-socket auto-detect.
+	// Re-hides the head on the new mesh itself.
+	ApplyHeroVisual();
 
 	// Fade in from black on every level load. Paired with APortalActor's fade-out before travel,
 	// this masks the one-time synchronous OpenLevel hitch so the transition reads as a smooth fade
@@ -247,6 +365,16 @@ void ALoopedCharacter::BeginPlay()
 				GI->ClearPendingNextRunCards();
 				UE_LOG(LogLoopedCore, Display, TEXT("Applied %d merchant next-run card(s)."), Pending.Num());
 			}
+
+			// Serin's ransom sting: the curse owed to Vorr lands as the run begins.
+			const FName OwedCurse = GI->TakePendingNextRunCurse();
+			if (!OwedCurse.IsNone())
+			{
+				GI->AddCurse(OwedCurse);
+				ShowCenterMessage(FText::FromString(FString::Printf(
+					TEXT("Vorr's ransom comes due — %s."), *GI->GetCurseDescription(OwedCurse).ToString())), 4.0f);
+				UE_LOG(LogLoopedCore, Display, TEXT("[Ransom] Next-run curse '%s' applied."), *OwedCurse.ToString());
+			}
 		}
 
 	}
@@ -269,6 +397,23 @@ void ALoopedCharacter::BeginPlay()
 			}
 		}
 		UE_LOG(LogLoopedCore, Display, TEXT("[Secret] Cached %d Time Sphere(s) in '%s'"), SecretSpheres.Num(), *LevelName);
+
+		// Relic "VoidCompass": pings when a still-unclaimed secret sphere hides in this room.
+		// Delayed a beat so the center-message widget infrastructure is ready.
+		if (SecretSpheres.Num() > 0)
+		{
+			if (ULoopedGameInstance* CompassGI = GetGameInstance<ULoopedGameInstance>())
+			{
+				if (CompassGI->HasArtifact(TEXT("VoidCompass")) && !CompassGI->HasArtifact(SecretSphereArtifact))
+				{
+					FTimerHandle CompassTimer;
+					GetWorldTimerManager().SetTimer(CompassTimer, FTimerDelegate::CreateWeakLambda(this, [this]()
+					{
+						ShowCenterMessage(FText::FromString(TEXT("the compass trembles — something hides in this room")), 4.0f);
+					}), 1.5f, false);
+				}
+			}
+		}
 	}
 
 	// Re-apply Speed/Gravity passives in case we just respawned in a new level (reads the deck,
@@ -367,6 +512,149 @@ void ALoopedCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCom
 		// replacing the old hold-to-bullet-time.
 		EIC->BindAction(SloMoAction, ETriggerEvent::Started, this, &ALoopedCharacter::ToggleHologramMenu);
 	}
+	if (InteractAction)
+	{
+		EIC->BindAction(InteractAction, ETriggerEvent::Started, this, &ALoopedCharacter::TryInteract);
+	}
+	if (SkillAction)
+	{
+		EIC->BindAction(SkillAction, ETriggerEvent::Started, this, &ALoopedCharacter::OnSkillPressed);
+	}
+}
+
+void ALoopedCharacter::OnSkillPressed()
+{
+	if (!IsAlive() || bHologramOpen) return;
+	if (bSkillActive)
+	{
+		EndChronoSkill();
+	}
+	else if (SkillGauge >= SkillMinActivation)
+	{
+		StartChronoSkill();
+	}
+}
+
+void ALoopedCharacter::StartChronoSkill()
+{
+	if (bSkillActive) return;
+	bSkillActive = true;
+	if (USloMoManager* SloMo = GetWorld()->GetSubsystem<USloMoManager>())
+	{
+		SloMo->RequestSloMo(ESloMoTrigger::SkillDodge);
+	}
+}
+
+void ALoopedCharacter::EndChronoSkill()
+{
+	if (!bSkillActive) return;
+	bSkillActive = false;
+	if (USloMoManager* SloMo = GetWorld()->GetSubsystem<USloMoManager>())
+	{
+		SloMo->ReleaseSloMo(ESloMoTrigger::SkillDodge);
+	}
+}
+
+float ALoopedCharacter::GetSkillGaugeMax() const
+{
+	const ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>();
+	return SkillGaugeMaxBase + (GI ? GI->GetSkillGaugeBonusSeconds() : 0.0f);
+}
+
+void ALoopedCharacter::UpdateSkillGaugeBar()
+{
+	// Lazy-create the slim low-center bar (same pattern as the interact prompt).
+	if (!SkillGaugeWidget)
+	{
+		APlayerController* PC = Cast<APlayerController>(GetController());
+		if (!PC && GetWorld()) PC = GetWorld()->GetFirstPlayerController();
+		TSubclassOf<UUserWidget> Cls = LoadClass<UUserWidget>(nullptr, TEXT("/Game/UI/WBP_SkillGauge.WBP_SkillGauge_C"));
+		if (!PC || !Cls) return;
+		SkillGaugeWidget = CreateWidget<UUserWidget>(PC, Cls);
+		if (!SkillGaugeWidget) return;
+		SkillGaugeWidget->AddToViewport(30); // under prompts/menus
+	}
+
+	const float Max = GetSkillGaugeMax();
+	if (UProgressBar* Bar = Cast<UProgressBar>(SkillGaugeWidget->GetWidgetFromName(TEXT("GaugeBar"))))
+	{
+		Bar->SetPercent(Max > 0.0f ? SkillGauge / Max : 0.0f);
+		// Active = hot white; ready = cyan; recharging from a dip = dimmer cyan.
+		const FLinearColor Fill = bSkillActive ? FLinearColor(0.95f, 0.98f, 1.0f)
+			: (SkillGauge >= Max - KINDA_SMALL_NUMBER) ? FLinearColor(0.20f, 0.85f, 1.0f)
+			                                           : FLinearColor(0.14f, 0.55f, 0.75f);
+		Bar->SetFillColorAndOpacity(Fill);
+	}
+}
+
+ILoopedInteractable* ALoopedCharacter::FindBestInteractable() const
+{
+	// Nearest ILoopedInteractable within its own range wins (keyholes, levers, shops, altars).
+	// The implementer count is tiny, so a full actor sweep is fine at poll rate.
+	ILoopedInteractable* Best = nullptr;
+	float BestDistSq = FLT_MAX;
+	for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+	{
+		ILoopedInteractable* Target = Cast<ILoopedInteractable>(*It);
+		if (!Target) continue;
+		const float Range = Target->GetInteractRange();
+		const float DistSq = FVector::DistSquared(It->GetActorLocation(), GetActorLocation());
+		if (DistSq <= Range * Range && DistSq < BestDistSq)
+		{
+			BestDistSq = DistSq;
+			Best = Target;
+		}
+	}
+	return Best;
+}
+
+void ALoopedCharacter::TryInteract()
+{
+	if (!IsAlive() || bHologramOpen) return;
+	if (ILoopedInteractable* Best = FindBestInteractable())
+	{
+		Best->Interact(this);
+	}
+}
+
+void ALoopedCharacter::UpdateInteractPrompt(float DeltaSeconds)
+{
+	// Light poll — the sweep is cheap but doesn't need to run every frame.
+	InteractPromptAccum += DeltaSeconds;
+	if (InteractPromptAccum < 0.15f) return;
+	InteractPromptAccum = 0.0f;
+
+	FText Prompt;
+	if (IsAlive() && !bHologramOpen)
+	{
+		if (ILoopedInteractable* Best = FindBestInteractable())
+		{
+			Prompt = Best->GetInteractPrompt();
+		}
+	}
+
+	if (Prompt.IsEmpty())
+	{
+		if (InteractPromptWidget) InteractPromptWidget->SetVisibility(ESlateVisibility::Collapsed);
+		return;
+	}
+
+	// Lazy-create the low-center prompt widget (runtime LoadClass, robust to creation order).
+	if (!InteractPromptWidget)
+	{
+		APlayerController* PC = Cast<APlayerController>(GetController());
+		if (!PC && GetWorld()) PC = GetWorld()->GetFirstPlayerController();
+		TSubclassOf<UUserWidget> Cls = LoadClass<UUserWidget>(nullptr, TEXT("/Game/UI/WBP_InteractPrompt.WBP_InteractPrompt_C"));
+		if (!PC || !Cls) return;
+		InteractPromptWidget = CreateWidget<UUserWidget>(PC, Cls);
+		if (!InteractPromptWidget) return;
+		InteractPromptWidget->AddToViewport(150);
+	}
+	if (UTextBlock* T = Cast<UTextBlock>(InteractPromptWidget->GetWidgetFromName(TEXT("MessageText"))))
+	{
+		T->SetText(FText::FromString(FString::Printf(TEXT("Press [E] to %s"), *Prompt.ToString())));
+	}
+	InteractPromptWidget->SetVisibility(ESlateVisibility::HitTestInvisible);
 }
 
 void ALoopedCharacter::Move(const FInputActionValue& Value)
@@ -420,12 +708,17 @@ void ALoopedCharacter::TakeDamageFromEnemy(float Damage)
 	}
 	AddCameraShake(1.2f); // small screen punch when you get hit (no-freeze damage feedback)
 
-	// Curse "Frailty": you take more damage this run.
 	if (const ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
 	{
+		// Curse "Frailty": you take more damage this run (Iron Will softens it).
 		if (GI->HasCurse(TEXT("Frailty")))
 		{
-			Damage *= GI->CurseFrailtyDamageMult;
+			Damage *= GI->ScaleCurseMult(GI->CurseFrailtyDamageMult);
+		}
+		// Card "GlassCannon": the pact cuts both ways — bonus damage dealt, bonus damage TAKEN.
+		if (const FPassiveCardLevel* GlassLv = GI->GetEffectiveLevelData(TEXT("GlassCannon")))
+		{
+			Damage *= 1.0f + GlassLv->Fraction;
 		}
 	}
 
@@ -489,6 +782,9 @@ void ALoopedCharacter::TakeDamageFromEnemy(float Damage)
 
 void ALoopedCharacter::EnterDeathCam()
 {
+	// Death releases the chrono skill — the world must not stay slowed over a corpse.
+	EndChronoSkill();
+
 	// Freeze the player: no input, no movement.
 	if (APlayerController* PC = Cast<APlayerController>(GetController()))
 	{
@@ -687,6 +983,18 @@ void ALoopedCharacter::StopCrouch(const FInputActionValue& Value)
 
 void ALoopedCharacter::ToggleHologramMenu()
 {
+	// Tutorial gate: no monitor until Orin straps it on (his rescue dialogue grants the
+	// artifact). Programmatic opens (card drafts) bypass this on purpose — they only fire
+	// post-grant anyway, and the tutorial's own draft must never dead-end.
+	if (!bHologramOpen && !MonitorGateArtifact.IsNone())
+	{
+		const ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>();
+		if (GI && !GI->HasArtifact(MonitorGateArtifact))
+		{
+			ShowCenterMessage(FText::FromString(TEXT("Your bare arm itches — something belongs there.")), 2.5f);
+			return;
+		}
+	}
 	if (bHologramOpen) { CloseHologram(); }
 	else               { OpenHologram(/*bRewardMode*/ false); }
 }
@@ -707,6 +1015,10 @@ void ALoopedCharacter::MountCardWidgetInMonitor(UUserWidget* CardWidget)
 	}
 	if (!WristMenuWidget) return;
 
+	// If the dashboard was already open (State 1), the missions panel is showing — the card draft
+	// owns the center now, so tuck it away (OpenHologram above only fires on a fresh open).
+	HideMissionsPanel();
+
 	if (UWidget* Center = WristMenuWidget->GetWidgetFromName(TEXT("CenterPanel")))
 	{
 		Center->SetVisibility(ESlateVisibility::Visible);
@@ -717,25 +1029,84 @@ void ALoopedCharacter::MountCardWidgetInMonitor(UUserWidget* CardWidget)
 		Placeholder->SetVisibility(ESlateVisibility::Collapsed);
 	}
 
-	// Drop the card widget into the CenterPanel (a VerticalBox) and let it fill the slot so the
-	// card row sits centered inside the monitor and scales with the layout.
-	if (UPanelWidget* Center = Cast<UPanelWidget>(WristMenuWidget->GetWidgetFromName(TEXT("CenterPanel"))))
+	// Cards render as their own full-screen viewport overlay — NOT parented into CenterPanel
+	// (tried that: squeezing the card canvas into the panel slot shrank it tiny, Sahar playtest
+	// 2026-07-03). Z must sit ABOVE the monitor (200): below it, the monitor's CenterPanel
+	// swallows every click even though the cards show through its transparent middle.
+	if (!CardWidget->IsInViewport())
 	{
-		if (UPanelSlot* Added = Center->AddChild(CardWidget))
+		CardWidget->AddToViewport(210);
+	}
+
+	// A previous draft may still be mounted (Mira's reroll replaces the widget wholesale) —
+	// pull it out of the panel before the new one goes in, or they stack.
+	if (MountedCardWidget.IsValid() && MountedCardWidget.Get() != CardWidget)
+	{
+		MountedCardWidget->RemoveFromParent();
+	}
+
+	// Rarity is FELT here: each card's description line takes its tier color (the name keeps
+	// its element color; the panel border brush is the icon art — hands off). CardRowName1..4
+	// were set by SetCardOptions/ConfigureExtra before this widget mounted.
+	if (const ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
+	{
+		for (int32 i = 1; i <= 4; ++i)
 		{
-			if (UVerticalBoxSlot* VSlot = Cast<UVerticalBoxSlot>(Added))
+			const FNameProperty* Prop = FindFProperty<FNameProperty>(
+				CardWidget->GetClass(), *FString::Printf(TEXT("CardRowName%d"), i));
+			if (!Prop) continue;
+			const FName Card = Prop->GetPropertyValue_InContainer(CardWidget);
+			if (Card.IsNone()) continue;
+			if (UTextBlock* Desc = Cast<UTextBlock>(CardWidget->GetWidgetFromName(*FString::Printf(TEXT("Card%dDesc"), i))))
 			{
-				FSlateChildSize FillSize;
-				FillSize.SizeRule = ESlateSizeRule::Fill;
-				FillSize.Value = 1.0f;
-				VSlot->SetSize(FillSize);
-				VSlot->SetHorizontalAlignment(HAlign_Fill);
-				VSlot->SetVerticalAlignment(VAlign_Fill);
+				Desc->SetColorAndOpacity(FSlateColor(ULoopedGameInstance::GetRarityColor(GI->GetPerkRarity(Card))));
 			}
 		}
 	}
 
+	// Mira "Reroll": show + bind her button only while the once-per-run token is unspent.
+	// C++-by-name binding, same pattern as the Boss/Room HUD buttons.
+	MountedCardWidget = CardWidget;
+	if (UButton* Reroll = Cast<UButton>(CardWidget->GetWidgetFromName(TEXT("RerollButton"))))
+	{
+		const ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>();
+		const bool bCanReroll = GI && GI->CanUseCardReroll();
+		Reroll->SetVisibility(bCanReroll ? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
+		Reroll->OnClicked.RemoveDynamic(this, &ALoopedCharacter::OnCardRerollClicked);
+		Reroll->OnClicked.AddDynamic(this, &ALoopedCharacter::OnCardRerollClicked);
+	}
+
 	RefreshDashboard();
+}
+
+void ALoopedCharacter::OnCardRerollClicked()
+{
+	ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>();
+	if (!GI || !GI->ConsumeCardReroll()) return;
+
+	// Hide the button — the token is spent for this run.
+	if (MountedCardWidget.IsValid())
+	{
+		if (UButton* Reroll = Cast<UButton>(MountedCardWidget->GetWidgetFromName(TEXT("RerollButton"))))
+		{
+			Reroll->SetVisibility(ESlateVisibility::Collapsed);
+		}
+	}
+
+	// Re-run the manager's roll — it redraws ChosenCard1..3 and refills the widget texts.
+	for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+	{
+		if (It->GetClass()->GetName() == TEXT("BP_CardRewardManager_C"))
+		{
+			if (UFunction* Fn = It->FindFunction(TEXT("TriggerCardReward")))
+			{
+				It->ProcessEvent(Fn, nullptr);
+				ShowCenterMessage(FText::FromString(TEXT("Mira retunes the frequencies — fresh cards.")), 2.5f);
+				UE_LOG(LogLoopedCore, Display, TEXT("[Companion] Mira reroll consumed — card draft redrawn."));
+			}
+			break;
+		}
+	}
 }
 
 // Dashboard widgets hidden while a dialogue owns the monitor. CenterHeader/CenterPlaceholder are
@@ -762,10 +1133,9 @@ void ALoopedCharacter::MountDialogueInMonitor(UUserWidget* DialogueWidget)
 			W->SetVisibility(ESlateVisibility::Collapsed);
 		}
 	}
-	if (UWidget* Placeholder = WristMenuWidget->GetWidgetFromName(TEXT("CenterPlaceholder")))
-	{
-		Placeholder->SetVisibility(ESlateVisibility::Collapsed);
-	}
+	// Dialogue takes the whole center — fold the guidance panel away so it doesn't sit under the
+	// speaker/body/buttons (it shares CenterPanel with them).
+	HideMissionsPanel();
 
 	if (UPanelWidget* Center = Cast<UPanelWidget>(WristMenuWidget->GetWidgetFromName(TEXT("CenterPanel"))))
 	{
@@ -813,6 +1183,9 @@ void ALoopedCharacter::UnmountDialogueFromMonitor(UUserWidget* DialogueWidget)
 
 void ALoopedCharacter::OpenHologram(bool bRewardMode)
 {
+	// The monitor takes over time; the chrono skill releases so its gauge stops draining.
+	EndChronoSkill();
+
 	bHologramOpen = true;
 
 	// Slow time exactly the way card rewards / the old bullet-time already do.
@@ -836,12 +1209,22 @@ void ALoopedCharacter::OpenHologram(bool bRewardMode)
 		WristMenuWidget->AddToViewport(200); // above the HUD
 	}
 
-	// The Center (card-draft) panel is only shown in State 2 (Reward Draft).
+	// The center column serves two masters: in State 2 (reward draft / dialogue) it hosts that
+	// content, so the guidance panel steps aside; in State 1 (the plain dashboard) the center IS
+	// the missions & hints panel, rebuilt live from GI->EvaluateMissions().
 	if (WristMenuWidget)
 	{
-		if (UWidget* Center = WristMenuWidget->GetWidgetFromName(TEXT("CenterPanel")))
+		if (bRewardMode)
 		{
-			Center->SetVisibility(bRewardMode ? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
+			HideMissionsPanel();
+			if (UWidget* Center = WristMenuWidget->GetWidgetFromName(TEXT("CenterPanel")))
+			{
+				Center->SetVisibility(ESlateVisibility::Visible);
+			}
+		}
+		else
+		{
+			RefreshMissionsPanel(); // shows CenterPanel + fills it
 		}
 	}
 
@@ -940,6 +1323,98 @@ void ALoopedCharacter::RefreshDashboard()
 	SetText(TEXT("CursesText"), Curses.IsEmpty() ? FString(TEXT("(none)")) : Curses);
 }
 
+void ALoopedCharacter::RefreshMissionsPanel()
+{
+	if (!WristMenuWidget) return;
+	ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>();
+	if (!GI) return;
+
+	UPanelWidget* Center = Cast<UPanelWidget>(WristMenuWidget->GetWidgetFromName(TEXT("CenterPanel")));
+	if (!Center) return;
+
+	// Match the dashboard's typeface: clone the font from an existing zone header (size 17) and a
+	// body block (size 14) so the guidance panel reads as part of the same monitor, not bolted on.
+	FSlateFontInfo HeaderFont, BodyFont;
+	if (UTextBlock* Src = Cast<UTextBlock>(WristMenuWidget->GetWidgetFromName(TEXT("DeckHeader")))) HeaderFont = Src->GetFont();
+	if (UTextBlock* Src = Cast<UTextBlock>(WristMenuWidget->GetWidgetFromName(TEXT("PerksText"))))  BodyFont   = Src->GetFont();
+
+	// Build the container once, then just refill it (rebuilding a fresh box each open would leak
+	// the old one into the widget tree). Parented into CenterPanel — the State-1 center column.
+	if (!MissionsBox)
+	{
+		MissionsBox = NewObject<UVerticalBox>(WristMenuWidget);
+		Center->AddChild(MissionsBox);
+	}
+	MissionsBox->ClearChildren();
+
+	auto AddLine = [&](const FString& S, const FSlateFontInfo& Font, const FLinearColor& Color)
+	{
+		UTextBlock* T = NewObject<UTextBlock>(WristMenuWidget);
+		if (!T) return;
+		T->SetText(FText::FromString(S));
+		T->SetFont(Font);
+		T->SetColorAndOpacity(FSlateColor(Color));
+		T->SetAutoWrapText(true);
+		if (UVerticalBoxSlot* VSlot = Cast<UVerticalBoxSlot>(MissionsBox->AddChild(T)))
+		{
+			VSlot->SetPadding(FMargin(0.f, 1.f, 0.f, 3.f));
+		}
+	};
+
+	const FLinearColor Amber(1.0f, 0.75f, 0.2f);
+	const FLinearColor Cyan(0.35f, 0.85f, 1.0f);
+	const FLinearColor Done(0.5f, 0.5f, 0.5f);
+
+	const TArray<FMissionStatus> Rows = GI->EvaluateMissions();
+
+	// The single highest-priority active hint is pinned as the header line (planning nudges only —
+	// v1 has no live/reflex hints here, since the panel is evaluated on open, not per-frame).
+	if (const FMissionStatus* Hint = Rows.FindByPredicate(
+			[](const FMissionStatus& S){ return S.Category == EMissionCategory::Hint; }))
+	{
+		AddLine(FString::Printf(TEXT("! %s"), *Hint->DisplayText.ToString()), HeaderFont, Amber);
+	}
+
+	AddLine(TEXT("OBJECTIVES"), HeaderFont, Cyan);
+
+	// Finished objectives drop off the board entirely (no lingering greyed [x] line) — only
+	// live work stays listed. Partial progress ("3/4") still shows; it isn't complete yet.
+	// Capped at MaxVisibleObjectives (priority already sorted them): the panel is a glance,
+	// not a ledger — overflow collapses to a dim "+N more".
+	int32 Shown = 0;
+	int32 Completed = 0;
+	int32 Overflow = 0;
+	for (const FMissionStatus& S : Rows)
+	{
+		if (S.Category != EMissionCategory::Mission) continue;
+		if (S.bComplete) { ++Completed; continue; }
+		if (Shown >= MaxVisibleObjectives) { ++Overflow; continue; }
+		++Shown;
+		AddLine(FString::Printf(TEXT("[ ] %s"), *S.DisplayText.ToString()), BodyFont, FLinearColor::White);
+	}
+	if (Overflow > 0)
+	{
+		AddLine(FString::Printf(TEXT("+%d more"), Overflow), BodyFont, Done);
+	}
+	if (Shown == 0)
+	{
+		// Tell "you've cleared everything" apart from "nothing has opened up yet".
+		AddLine(Completed > 0 ? TEXT("All objectives complete.") : TEXT("(no objectives yet)"),
+			BodyFont, Done);
+	}
+
+	Center->SetVisibility(ESlateVisibility::Visible);
+	MissionsBox->SetVisibility(ESlateVisibility::Visible);
+}
+
+void ALoopedCharacter::HideMissionsPanel()
+{
+	if (MissionsBox)
+	{
+		MissionsBox->SetVisibility(ESlateVisibility::Collapsed);
+	}
+}
+
 void ALoopedCharacter::AddCameraShake(float Intensity)
 {
 	// Take the max so overlapping shakes don't stack into a violent jolt — keeps it tight + crisp.
@@ -955,9 +1430,60 @@ void ALoopedCharacter::OnJumped_Implementation()
 	}
 }
 
+void ALoopedCharacter::Landed(const FHitResult& Hit)
+{
+	Super::Landed(Hit);
+
+	// Card "Shockwave": landing from a jump slams nearby enemies — damage + a hard stop.
+	// Pairs with the Gravity build (heavier fall, same slam). Values from the card's level row.
+	ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>();
+	const FPassiveCardLevel* Lv = GI ? GI->GetEffectiveLevelData(TEXT("Shockwave")) : nullptr;
+	if (!Lv || Lv->Damage <= 0.0f || Lv->Radius <= 0.0f) return;
+
+	int32 HitCount = 0;
+	const FVector MyLoc = GetActorLocation();
+	for (TActorIterator<AEnemyBase> It(GetWorld()); It; ++It)
+	{
+		AEnemyBase* Enemy = *It;
+		if (!Enemy || !Enemy->IsAlive()) continue;
+		if (FVector::Dist(MyLoc, Enemy->GetActorLocation()) > Lv->Radius) continue;
+		Enemy->TakeDamageFromPlayer(Lv->Damage, this);
+		Enemy->GetCharacterMovement()->StopMovementImmediately(); // the stagger beat
+		++HitCount;
+	}
+	if (HitCount > 0)
+	{
+		AddCameraShake(0.8f);
+		UE_LOG(LogLoopedCore, Display, TEXT("[Card] Shockwave hit %d enemies (%.0f dmg, %.0f radius)"),
+			HitCount, Lv->Damage, Lv->Radius);
+	}
+}
+
+void ALoopedCharacter::TriggerMomentumBurst(float SpeedFraction)
+{
+	if (SpeedFraction <= 0.0f) return;
+	MomentumSpeedBonus = SpeedFraction;
+	ApplyMovementMods();
+	// Refresh (not stack) on every kill — chain kills keep the burst alive.
+	GetWorldTimerManager().SetTimer(MomentumTimerHandle, this, &ALoopedCharacter::EndMomentumBurst,
+		FMath::Max(0.2f, MomentumDuration), false);
+}
+
+void ALoopedCharacter::EndMomentumBurst()
+{
+	MomentumSpeedBonus = 0.0f;
+	ApplyMovementMods();
+}
+
 void ALoopedCharacter::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+
+	// Hero body: single-node anim follows velocity (attack one-shots hold their window).
+	UpdateHeroAnim();
+
+	// Proximity "Press [E] to ..." prompt (self-throttled to ~7Hz inside).
+	UpdateInteractPrompt(DeltaSeconds);
 
 	// Death cam: glide the (detached) camera from the FP view up/away to the overhead death shot,
 	// then hold. While dead we skip the rest of Tick (shake/decay/etc) so nothing disturbs the shot.
@@ -1002,6 +1528,31 @@ void ALoopedCharacter::Tick(float DeltaSeconds)
 		GI->AddPlaytime(DeltaSeconds);
 	}
 
+	// Q chrono skill: drain while active, trickle back while not — in REAL seconds, so the
+	// slow-mo itself can't warp the budget. Mirrored to the run state (travels like health).
+	{
+		const float RealDt = GetWorld()->DeltaRealTimeSeconds;
+		const float Max = GetSkillGaugeMax();
+		if (bSkillActive)
+		{
+			SkillGauge -= RealDt;
+			if (SkillGauge <= 0.0f)
+			{
+				SkillGauge = 0.0f;
+				EndChronoSkill();
+			}
+		}
+		else if (SkillGauge < Max)
+		{
+			SkillGauge = FMath::Min(SkillGauge + SkillRechargePerSecond * RealDt, Max);
+		}
+		if (ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
+		{
+			GI->SetRunSkillGauge(SkillGauge);
+		}
+		UpdateSkillGaugeBar();
+	}
+
 	// Secret chain link 3: while the gate is open, touching a room's Time Sphere grants an artifact.
 	CheckSecretSpheres(DeltaSeconds);
 	UpdateDimmedEffect(DeltaSeconds);
@@ -1015,7 +1566,8 @@ void ALoopedCharacter::Tick(float DeltaSeconds)
 		{
 			if (GI->HasCurse(TEXT("Decay")))
 			{
-				DecayAccum += GI->CurseDecayPerSecond * DeltaSeconds;
+				// Iron Will slows the rot.
+				DecayAccum += GI->CurseDecayPerSecond * GI->GetCurseSeverityMult() * DeltaSeconds;
 				if (DecayAccum >= 1.0f)
 				{
 					const float Chunk = FMath::FloorToFloat(DecayAccum);
@@ -1126,9 +1678,11 @@ bool ALoopedCharacter::IsPerkAtMax(FName PerkName) const
 
 TArray<FName> ALoopedCharacter::GetEligibleCards(const TArray<FName>& InAll) const
 {
+	// BP_CardRewardManager's one call site treats the result AS the draft (it displays
+	// index 0..N-1 verbatim), so return the rarity-weighted OFFER, not the raw pool.
 	if (const ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
 	{
-		return GI->GetEligibleCards(InAll);
+		return GI->GetCardOffer(InAll);
 	}
 	return InAll;
 }
@@ -1340,19 +1894,21 @@ void ALoopedCharacter::ShowCenterMessage(const FText& Message, float Duration)
 	}
 	Msg->AddToViewport(200);
 
-	// Stack vertically: each concurrent message sits a row below the previous one.
-	const int32 Slot = ActiveCenterMessageCount;
-	ActiveCenterMessageCount++;
-	Msg->SetRenderTranslation(FVector2D(0.0f, (float)Slot * 52.0f));
+	// Stack down from the top-anchored widget: claim the LOWEST free row, release exactly it on
+	// expiry. Guarantees two live messages can never share a row (the old counter could).
+	int32 Slot = 0;
+	while (OccupiedCenterSlots.Contains(Slot)) { Slot++; }
+	OccupiedCenterSlots.Add(Slot);
+	Msg->SetRenderTranslation(FVector2D(0.0f, (float)Slot * 36.0f)); // rows sized for the 26pt font
 
 	// Transient — auto-remove after Duration (matches the parkour/unlock message pattern).
 	TWeakObjectPtr<UUserWidget> WeakMsg(Msg);
 	TWeakObjectPtr<ALoopedCharacter> WeakThis(this);
 	FTimerHandle TH;
-	GetWorldTimerManager().SetTimer(TH, FTimerDelegate::CreateLambda([WeakMsg, WeakThis]()
+	GetWorldTimerManager().SetTimer(TH, FTimerDelegate::CreateLambda([WeakMsg, WeakThis, Slot]()
 	{
 		if (WeakMsg.IsValid()) WeakMsg->RemoveFromParent();
-		if (WeakThis.IsValid()) WeakThis->ActiveCenterMessageCount = FMath::Max(0, WeakThis->ActiveCenterMessageCount - 1);
+		if (WeakThis.IsValid()) WeakThis->OccupiedCenterSlots.Remove(Slot);
 	}), Duration, false);
 }
 
@@ -1364,18 +1920,19 @@ void ALoopedCharacter::ApplyMovementMods()
 	float SpeedMul = 1.0f;
 	if (const FPassiveCardLevel* SpeedLv = GetLevelData(GI, TEXT("Speed"))) SpeedMul += SpeedLv->MoveSpeedBonus;
 	if (GI) SpeedMul += GI->GetArtifactSpeedBonus(); // run relics (additive fraction)
+	SpeedMul += MomentumSpeedBonus;                  // card "Momentum": active kill-burst
 
 	// Wing artifact lowers the STARTING base gravity; the Gravity perk multiplies that base.
 	const float BaseGravity = (GI && GI->HasArtifact(TEXT("Wing"))) ? WingGravityBase : 1.0f;
 	float GravityMul = 1.0f;
 	if (const FPassiveCardLevel* GravLv = GetLevelData(GI, TEXT("Gravity"))) GravityMul = GravLv->GravityScale;
 
-	// Curse "Leaden": temporal drag — slower and heavier for the run.
+	// Curse "Leaden": temporal drag — slower and heavier for the run (Iron Will softens both).
 	float CurseGravityMul = 1.0f;
 	if (GI && GI->HasCurse(TEXT("Leaden")))
 	{
-		SpeedMul *= GI->CurseLeadenSpeedMult;
-		CurseGravityMul = GI->CurseLeadenGravityMult;
+		SpeedMul *= GI->ScaleCurseMult(GI->CurseLeadenSpeedMult);
+		CurseGravityMul = GI->ScaleCurseMult(GI->CurseLeadenGravityMult);
 	}
 
 	const float ArtifactGravityMul = GI ? GI->GetArtifactGravityMult() : 1.0f; // run relics (Featherweight 0.85)

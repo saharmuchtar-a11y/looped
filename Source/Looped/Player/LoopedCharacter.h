@@ -126,6 +126,14 @@ private:
 	int32 CapacitorHitCounter = 0;   // StaticCapacitor relic — counts hits toward the next spark pulse
 
 public:
+	// Card "Momentum": kills grant a brief speed burst. The GameInstance kill hook calls this
+	// with the card's Fraction; the bonus folds into ApplyMovementMods and a timer clears it.
+	void TriggerMomentumBurst(float SpeedFraction);
+
+	// Card "Momentum": burst duration in seconds (refreshed on every kill).
+	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|Perks")
+	float MomentumDuration = 3.0f;
+
 	// Run relic "StaticCapacitor": every CapacitorHitInterval-th landed hit emits a free spark
 	// pulse (reuses the enemy ChainSpark AoE). Tunables, no code change to rebalance.
 	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|Artifacts")
@@ -161,8 +169,19 @@ public:
 	// Mount the card-draft widget INSIDE the monitor's CenterPanel (instead of a separate
 	// centered viewport overlay), so the cards live in this layout and scale with it. Opens the
 	// monitor in reward mode if needed, hides the center placeholder, and fills the panel slot.
+	// Also wires Mira's REROLL button (shown only while her once-per-run token is unspent).
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|UI")
 	void MountCardWidgetInMonitor(class UUserWidget* CardWidget);
+
+	// Mira "Reroll": consume the token and re-run the manager's card roll for a fresh draft.
+	UFUNCTION()
+	void OnCardRerollClicked();
+
+private:
+	// The card widget currently mounted in the monitor (for the reroll handler).
+	TWeakObjectPtr<class UUserWidget> MountedCardWidget;
+
+public:
 
 	// Dialogue takes over the WHOLE monitor: opens it (slow-mo, cursor, no-damage shield), hides
 	// every dashboard zone (deck/relics/curses/artifacts/currency/logo), and fills CenterPanel
@@ -183,6 +202,16 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|UI")
 	void RefreshDashboard();
 
+	// Fill the monitor's State-1 center with the guidance panel: the missions list plus the one
+	// highest-priority hint pinned as a header (GI->EvaluateMissions() over DT_Missions). Rows
+	// are runtime TextBlocks inside a private box parented into CenterPanel — rebuilt on every
+	// dashboard open, so the numbers are always current. Only State 1 shows it: the card draft
+	// and dialogue mounts call HideMissionsPanel() before they take the center.
+	void RefreshMissionsPanel();
+
+	// Collapse the missions box (card draft / dialogue owns the center, or monitor closing).
+	void HideMissionsPanel();
+
 	// Touch radius (uu) for the secret Time-Sphere artifact grant.
 	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|Artifacts")
 	float SecretSphereTouchRadius = 160.0f;
@@ -199,11 +228,54 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|Artifacts")
 	float SecretSphereMessageDuration = 6.0f;
 
+	// --- Arm Monitor gate (tutorial arc) ---
+	// The monitor is Orin's gift: until this artifact is owned, middle-click only nudges.
+	// Granted by his tutorial rescue dialogue; legacy saves are migrated in LoadOrCreateStats
+	// so existing players never lose the monitor. None = gate off.
+	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|Tutorial")
+	FName MonitorGateArtifact = TEXT("Orin");
+
+	// Tutorial director polls: chrono skill active / arm monitor open right now?
+	bool IsChronoSkillActive() const { return bSkillActive; }
+	bool IsHologramOpen() const { return bHologramOpen; }
+
+	// Cap on live objectives listed in the monitor panel (Sahar: "too much text on the monitor").
+	// Overflow collapses to a dim "+N more" line; the hint header doesn't count against it.
+	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|Monitor")
+	int32 MaxVisibleObjectives = 3;
+
+	// --- Hero visual kit (heronew Wasteland Wanderer; a DT_EnemyVisuals row, same system as
+	// the enemies). None = keep the mannequin + AnimBP. Applied at BeginPlay: mesh swap,
+	// single-node anims by velocity, weapon socket auto-detected on the new rig.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Visual")
+	FName HeroVisualRow = FName(TEXT("Hero"));
+
+	// One-shot swing/charge on the hero body — WeaponHolder calls this on every shot, so the
+	// player SEES the hit (melee = Attack anim, ranged = the rifle-charge in the Cast slot).
+	void PlayHeroAttackAnim(bool bMelee);
+
+private:
+	void ApplyHeroVisual();
+	void UpdateHeroAnim();
+	void PlayHeroAnim(class UAnimSequence* Anim, bool bLoop);
+
+	UPROPERTY() TObjectPtr<class UAnimSequence> HeroIdle;
+	UPROPERTY() TObjectPtr<class UAnimSequence> HeroWalk;
+	UPROPERTY() TObjectPtr<class UAnimSequence> HeroRun;
+	UPROPERTY() TObjectPtr<class UAnimSequence> HeroAttack;
+	UPROPERTY() TObjectPtr<class UAnimSequence> HeroCast;
+	UPROPERTY() TObjectPtr<class UAnimSequence> HeroCurrentAnim;
+	bool bHeroVisualDriven = false;
+	double HeroAttackHoldUntil = 0.0;
+
+public:
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
 	virtual void SetupPlayerInputComponent(UInputComponent* PlayerInputComponent) override;
 	virtual void OnJumped_Implementation() override; // plays the jump SFX
+	virtual void Landed(const FHitResult& Hit) override; // card "Shockwave": landing AoE
 
 	// Components
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
@@ -289,6 +361,11 @@ protected:
 	UPROPERTY()
 	TObjectPtr<class UUserWidget> WristMenuWidget;
 
+	// The missions/hints box built at runtime inside the monitor's CenterPanel (State 1 only).
+	// Owned by the widget tree once parented; kept here so refreshes rebuild instead of stack.
+	UPROPERTY()
+	TObjectPtr<class UVerticalBox> MissionsBox;
+
 	// Input
 	UPROPERTY(EditDefaultsOnly, Category = "Input")
 	TObjectPtr<UInputMappingContext> DefaultMappingContext;
@@ -314,6 +391,27 @@ protected:
 	// Hold to enter manual bullet-time (world slows, player stays full speed). Bound to MiddleMouseButton.
 	UPROPERTY(EditDefaultsOnly, Category = "Input")
 	TObjectPtr<UInputAction> SloMoAction;
+
+	// Press-E interact (forge keyholes / levers — anything ILoopedInteractable). Loaded in the
+	// ctor like SloMo (mapped to E in IMC_Default), so no per-Blueprint assignment is needed.
+	UPROPERTY(EditDefaultsOnly, Category = "Input")
+	TObjectPtr<UInputAction> InteractAction;
+
+	// Q — the equipped SKILL (default: chrono dodge). Loaded in the ctor (mapped to Q in
+	// IMC_Default). More skills later share this one key.
+	UPROPERTY(EditDefaultsOnly, Category = "Input")
+	TObjectPtr<UInputAction> SkillAction;
+
+	// --- Q chrono skill (the default skill): world slows, player slows LESS — dodge windows.
+	// Gauge in seconds; drains 1:1 real-time while active, recharges SkillRechargePerSecond.
+	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|Skill")
+	float SkillGaugeMaxBase = 5.0f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|Skill")
+	float SkillRechargePerSecond = 0.2f; // 1s of use back per 5s idle (empty→full in 25s)
+
+	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|Skill")
+	float SkillMinActivation = 0.5f; // don't allow sputtering activations on an empty gauge
 
 	// Movement params
 	UPROPERTY(EditDefaultsOnly, Category = "Movement")
@@ -344,6 +442,35 @@ private:
 	void StopSprint(const FInputActionValue& Value);
 	void StartCrouch(const FInputActionValue& Value);
 	void StopCrouch(const FInputActionValue& Value);
+	// E press: find the nearest ILoopedInteractable in range and fire it (keyholes, levers).
+	void TryInteract();
+
+	// Shared scan for TryInteract + the proximity prompt: nearest implementer within its range.
+	class ILoopedInteractable* FindBestInteractable() const;
+
+	// Proximity prompt ("Press [E] to <verb>"): polled on a light Tick accumulator; shows a
+	// low-center viewport widget while the nearest interactable offers a non-empty verb.
+	void UpdateInteractPrompt(float DeltaSeconds);
+	float InteractPromptAccum = 0.0f;
+
+	UPROPERTY()
+	TObjectPtr<UUserWidget> InteractPromptWidget;
+
+	// --- Q chrono skill state ---
+	// Q press: toggle. Tick drains/recharges in REAL seconds (dilation must not warp the math)
+	// and mirrors the gauge to the run state so it travels between rooms like health.
+	void OnSkillPressed();
+	void StartChronoSkill();
+	void EndChronoSkill();
+	float GetSkillGaugeMax() const; // base + Lysa's permanent training ranks
+	void UpdateSkillGaugeBar();     // lazy-creates WBP_SkillGauge, sets percent + fill color
+
+	float SkillGauge = -1.0f;       // seeded from run state / max on BeginPlay
+	bool bSkillActive = false;
+
+	UPROPERTY()
+	TObjectPtr<UUserWidget> SkillGaugeWidget;
+
 	// Middle-Mouse press toggles the arm monitor (State 1, manual analysis — no card draft).
 	void ToggleHologramMenu();
 	// Shared open path; slows time via SloMoManager + frees the cursor. bRewardMode = State 2
@@ -382,9 +509,9 @@ private:
 	// gate is open (Gravity ever maxed), grants the secret artifact on touch (one-time).
 	void CheckSecretSpheres(float DeltaSeconds);
 
-	// How many center messages are currently on screen — used to stack them vertically so multiple
-	// rapid messages (e.g. dialogue outcomes) don't draw on top of each other.
-	int32 ActiveCenterMessageCount = 0;
+	// The occupied message rows. Each live message claims the LOWEST free row and releases that
+	// exact row on expiry — a plain counter overlapped when an older message outlived a newer one.
+	TSet<int32> OccupiedCenterSlots;
 
 	// Show a transient centered story message via WBP_CenterMessage (auto-removed after Duration).
 	// Public so external systems (e.g. dialogue events) can surface "what happened" text.
@@ -417,6 +544,11 @@ private:
 
 	// Curse "Decay": accumulates fractional HP loss so we apply it in ~1 HP chunks (less log spam).
 	float DecayAccum = 0.0f;
+
+	// Card "Momentum": active kill-burst speed bonus (additive fraction; 0 = none). Timer-cleared.
+	float MomentumSpeedBonus = 0.0f;
+	FTimerHandle MomentumTimerHandle;
+	void EndMomentumBurst();
 
 	// --- Curse "Dimmed": the world goes dark (camera exposure drop). UI is UMG = unaffected;
 	// emissive markers/lights stand out MORE in the gloom (intended — they guide you through it).

@@ -2,6 +2,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/WorldSettings.h"
+#include "Core/LoopedGameInstance.h"
 #include "Looped.h"
 
 void USloMoManager::Initialize(FSubsystemCollectionBase& Collection)
@@ -11,17 +12,42 @@ void USloMoManager::Initialize(FSubsystemCollectionBase& Collection)
 		TargetTimeDilation, TransitionDuration);
 }
 
+void USloMoManager::RecomputeProfile()
+{
+	// Strongest slow (lowest dilation) among active triggers picks the profile. Every trigger
+	// except the Q skill keeps the classic menu profile: hard slow, player fully exempt.
+	CurrentTargetDilation = TargetTimeDilation;
+	CurrentExemptFraction = 1.0f;
+	if (ActiveTriggers.Num() == 1 && ActiveTriggers.Contains(ESloMoTrigger::SkillDodge))
+	{
+		CurrentTargetDilation = SkillDilation;
+		CurrentExemptFraction = SkillPlayerExemptFraction;
+	}
+
+	// Blessing "Hourglass": bullet-time bites deeper this run (world dilation x0.8 by default).
+	if (const UWorld* World = GetWorld())
+	{
+		if (const ULoopedGameInstance* GI = World->GetGameInstance<ULoopedGameInstance>())
+		{
+			if (GI->HasRunArtifact(TEXT("Hourglass")))
+			{
+				CurrentTargetDilation = FMath::Max(0.02f, CurrentTargetDilation * GI->HourglassDilationMult);
+			}
+		}
+	}
+}
+
 void USloMoManager::RequestSloMo(ESloMoTrigger Trigger, float Duration)
 {
 	ActiveTriggers.Add(Trigger);
+	RecomputeProfile();
 
 	UE_LOG(LogLoopedSloMo, Display, TEXT("SloMo requested: %s (duration: %.1f, active triggers: %d)"),
 		*UEnum::GetValueAsString(Trigger), Duration, ActiveTriggers.Num());
 
-	if (!bIsSlowMo)
-	{
-		EnterSloMo();
-	}
+	// Always (re)ramp: entering fresh, or re-targeting because the profile changed
+	// (e.g. the monitor opened while the Q skill was already slowing time).
+	EnterSloMo();
 
 	if (Duration > 0.0f)
 	{
@@ -46,9 +72,14 @@ void USloMoManager::ReleaseSloMo(ESloMoTrigger Trigger)
 	UE_LOG(LogLoopedSloMo, Display, TEXT("SloMo released: %s (remaining triggers: %d)"),
 		*UEnum::GetValueAsString(Trigger), ActiveTriggers.Num());
 
+	RecomputeProfile();
 	if (ActiveTriggers.Num() == 0 && bIsSlowMo)
 	{
 		ExitSloMo();
+	}
+	else if (bIsSlowMo)
+	{
+		EnterSloMo(); // remaining triggers may want a different profile — re-ramp to it
 	}
 }
 
@@ -106,10 +137,10 @@ void USloMoManager::StepTransition()
 
 	if (bTransitioningToSlow)
 	{
-		UpdateTimeDilation(FMath::Lerp(TransitionStartDilation, TargetTimeDilation, Alpha));
+		UpdateTimeDilation(FMath::Lerp(TransitionStartDilation, CurrentTargetDilation, Alpha));
 		if (RawAlpha >= 1.0f)
 		{
-			UpdateTimeDilation(TargetTimeDilation);
+			UpdateTimeDilation(CurrentTargetDilation);
 			GetWorld()->GetTimerManager().ClearTimer(TransitionTimerHandle);
 			UE_LOG(LogLoopedSloMo, Verbose, TEXT("Slo-mo entry ramp complete"));
 		}
@@ -131,12 +162,14 @@ void USloMoManager::UpdateTimeDilation(float Dilation)
 	const float SafeDilation = FMath::Max(Dilation, SMALL_NUMBER);
 	UGameplayStatics::SetGlobalTimeDilation(GetWorld(), SafeDilation);
 
-	// Exempt player pawn so camera and input remain at full speed
+	// Fractional player exemption: net player speed = Dilation^(1 - Fraction).
+	// Fraction 1 (menus) = 1/Dilation = fully exempt, the original behavior; the Q skill's
+	// ~0.66 leaves the player slowed too, just less than the world. Smooth through the ramp.
 	if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
 	{
 		if (APawn* Pawn = PC->GetPawn())
 		{
-			Pawn->CustomTimeDilation = 1.0f / SafeDilation;
+			Pawn->CustomTimeDilation = FMath::Pow(1.0f / SafeDilation, CurrentExemptFraction);
 		}
 	}
 }

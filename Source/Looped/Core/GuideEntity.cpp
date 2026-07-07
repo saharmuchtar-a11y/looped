@@ -96,8 +96,12 @@ void AGuideEntity::Tick(float DeltaSeconds)
 void AGuideEntity::OnOverlap(UPrimitiveComponent* /*OverlappedComp*/, AActor* OtherActor, UPrimitiveComponent* /*OtherComp*/,
 	int32 /*OtherBodyIndex*/, bool /*bFromSweep*/, const FHitResult& /*Sweep*/)
 {
-	APawn* Pawn = Cast<APawn>(OtherActor);
-	if (!Pawn || !Pawn->IsPlayerControlled() || bOpen) return;
+	// Walk-in no longer opens the book — reading is a deliberate press-E (Interact).
+}
+
+void AGuideEntity::Interact(ALoopedCharacter* Player)
+{
+	if (bOpen) return;
 	OpenGuide();
 }
 
@@ -250,7 +254,10 @@ FString AGuideEntity::BuildPage(int32 PageIndex) const
 		{
 			static const TCHAR* CurseIds[] = { TEXT("Tithe"), TEXT("Frailty"), TEXT("Bloodless"), TEXT("Leaden"),
 				TEXT("Decay"), TEXT("Marked"), TEXT("Dimmed"), TEXT("Brittle"), TEXT("Scarcity"),
-				TEXT("Weakness"), TEXT("Volatile"), TEXT("Static") };
+				TEXT("Weakness"), TEXT("Volatile"), TEXT("Static"),
+				TEXT("Toll"), TEXT("DullBlade"), TEXT("ShatteredSight"), TEXT("Bounty"), TEXT("Cowardice"),
+				TEXT("Feverdream"), TEXT("Extortion"), TEXT("Amnesia"), TEXT("Swarm"), TEXT("Haunted"),
+				TEXT("Fogbound") };
 			for (const TCHAR* Id : CurseIds)
 			{
 				if (GI->IsCurseSeen(FName(Id)))

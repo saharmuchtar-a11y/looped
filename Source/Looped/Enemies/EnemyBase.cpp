@@ -3,6 +3,7 @@
 #include "Looped.h"
 #include "Core/LoopedRunGameMode.h"
 #include "Core/LoopedGameInstance.h"
+#include "Data/LoopedSaveData.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/StaticMeshComponent.h"
@@ -12,6 +13,8 @@
 #include "Animation/AnimSequence.h"
 #include "Animation/AnimInstance.h"
 #include "Enemies/EnemyProjectile.h"
+#include "Enemies/BossBase.h"
+#include "Data/EnemyVisualData.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Kismet/GameplayStatics.h"
 #include "TimerManager.h"
@@ -112,7 +115,12 @@ bool AEnemyBase::ApplyEnemyType(FName RowName)
 	// run. Set placed filler enemies to Random and keep each room's signature enemy a fixed row.
 	if (RowName == TEXT("Random"))
 	{
-		const int32 CurrentFloor = 1; // single floor today; reads the run state once Floors 2-3 exist
+		// Deeper floors widen the pool: rows with MinFloor 2/3 only start appearing down there.
+		int32 CurrentFloor = 1;
+		if (const ULoopedGameInstance* FloorGI = GetGameInstance<ULoopedGameInstance>())
+		{
+			CurrentFloor = FloorGI->GetCurrentFloor();
+		}
 		float TotalWeight = 0.0f;
 		TArray<TPair<FName, float>> Candidates;
 		for (const auto& Pair : EnemyTypeTable->GetRowMap())
@@ -163,6 +171,18 @@ bool AEnemyBase::ApplyEnemyType(FName RowName)
 	ProjectileElement = Row->ProjectileElement;
 	SetActorScale3D(FVector(Row->Scale));
 
+	// Floors 2-3: deeper floors hit harder and last longer (per-floor knobs on the GameInstance).
+	// Bosses are EXEMPT — their DT rows are absolute per-floor tuning, not floor-multiplied.
+	if (!IsA<ABossBase>())
+	{
+		if (const ULoopedGameInstance* FloorGI = GetGameInstance<ULoopedGameInstance>())
+		{
+			POCHealth    *= FloorGI->GetFloorHealthMult();
+			MeleeDamage  *= FloorGI->GetFloorDamageMult();
+			RangedDamage *= FloorGI->GetFloorDamageMult();
+		}
+	}
+
 	// Runtime application (spawner path): BeginPlay already ran, so redo the bits it derived.
 	if (HasActorBegunPlay())
 	{
@@ -207,6 +227,10 @@ void AEnemyBase::BeginPlay()
 
 	CurrentHealth = POCHealth;
 	MaxHealthCached = POCHealth;
+
+	// Meshy visual kit — the FLOOR owns the look (per-floor melee/ranged/boss characters);
+	// the archetype row above keeps owning the stats. Missing rows keep the legacy visuals.
+	ApplyEnemyVisual(VisualRowOverride.IsNone() ? AutoVisualRow() : VisualRowOverride);
 
 	if (VisualMesh)
 	{
@@ -279,6 +303,18 @@ void AEnemyBase::BeginPlay()
 	RefreshSpeed();
 	RefreshColor();
 
+	// Curse "ShatteredSight": enemy health bars are hidden from spawn, not just after a hit.
+	if (HPBarWidget)
+	{
+		if (const ULoopedGameInstance* SightGI = GetGameInstance<ULoopedGameInstance>())
+		{
+			if (SightGI->HasCurse(TEXT("ShatteredSight")))
+			{
+				HPBarWidget->SetVisibility(false);
+			}
+		}
+	}
+
 	// Guard post = where we spawned. Only used when GuardRadius > 0.
 	GuardHome = GetActorLocation();
 
@@ -292,6 +328,86 @@ void AEnemyBase::BeginPlay()
 	UE_LOG(LogLoopedAI, Display, TEXT("Enemy spawned: HP=%.0f %s slot=%d"), CurrentHealth, bIsRanged ? TEXT("(RANGED)") : TEXT("(MELEE)"), FlankSlotIndex);
 }
 
+FName AEnemyBase::AutoVisualRow() const
+{
+	int32 Floor = 1;
+	if (const ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
+	{
+		Floor = GI->GetCurrentFloor();
+	}
+	if (bIsBoss)
+	{
+		return FName(*FString::Printf(TEXT("Boss_F%d"), Floor));
+	}
+	return FName(*FString::Printf(TEXT("F%d_%s"), Floor, bIsRanged ? TEXT("Ranged") : TEXT("Melee")));
+}
+
+bool AEnemyBase::ApplyEnemyVisual(FName VisualRow)
+{
+	if (VisualRow.IsNone() || !GetMesh()) return false;
+	if (!VisualTable)
+	{
+		VisualTable = LoadObject<UDataTable>(nullptr, TEXT("/Game/Data/DT_EnemyVisuals.DT_EnemyVisuals"));
+	}
+	if (!VisualTable) return false;
+	const FEnemyVisualSet* Row = VisualTable->FindRow<FEnemyVisualSet>(VisualRow, TEXT("ApplyEnemyVisual"), false);
+	if (!Row) return false;
+	USkeletalMesh* NewMesh = Row->Mesh.LoadSynchronous();
+	if (!NewMesh) return false;
+
+	GetMesh()->SetSkeletalMesh(NewMesh);
+	GetMesh()->SetRelativeLocation(Row->MeshRelLocation);
+	GetMesh()->SetRelativeRotation(FRotator(0.0f, Row->MeshRelYaw, 0.0f));
+	GetMesh()->SetRelativeScale3D(FVector(Row->MeshScale));
+	GetMesh()->SetAnimationMode(EAnimationMode::AnimationSingleNode);
+	GetMesh()->EmptyOverrideMaterials(); // Meshy materials live on the mesh asset (the Mira lesson)
+
+	// Meshy rigs have degenerate REF poses (near-zero bone scales), so the pose must always
+	// tick (a culled mesh that never refreshes bones would stay collapsed forever). Bounds come
+	// from the LIVE bones — correct now that the anims' roots are unlocked. (Fixed-skel-bounds
+	// was tried and caused distance flicker: the asset's imported bounds are ref-pose-degenerate.)
+	GetMesh()->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
+
+	VisIdle   = Row->Idle.LoadSynchronous();
+	VisWalk   = Row->Walk.LoadSynchronous();
+	VisRun    = Row->Run.LoadSynchronous();
+	VisAttack = Row->Attack.LoadSynchronous();
+	VisCast   = Row->Cast.LoadSynchronous();
+	VisDeath  = Row->Death.LoadSynchronous();
+	bVisualDriven = true;
+	CurrentVisualRow = VisualRow;
+	CurrentVisAnim = nullptr;
+	PlayVisualAnim(VisIdle ? VisIdle.Get() : VisWalk.Get(), true);
+	UE_LOG(LogLoopedAI, Display, TEXT("%s: visual kit '%s' applied."), *GetName(), *VisualRow.ToString());
+	return true;
+}
+
+void AEnemyBase::PlayVisualAnim(UAnimSequence* Anim, bool bLoop)
+{
+	if (!Anim || !GetMesh() || CurrentVisAnim == Anim) return;
+	CurrentVisAnim = Anim;
+	GetMesh()->PlayAnimation(Anim, bLoop);
+}
+
+void AEnemyBase::UpdateVisualAnim()
+{
+	// Attack-ish states hold a one-shot swing/cast; everything else follows velocity.
+	if (AIState == EEnemyAIState::Windup || AIState == EEnemyAIState::Lunge ||
+		AIState == EEnemyAIState::SpecialWindup || AIState == EEnemyAIState::SpecialBurst)
+	{
+		const bool bCasting = bIsRanged ||
+			AIState == EEnemyAIState::SpecialWindup || AIState == EEnemyAIState::SpecialBurst;
+		UAnimSequence* Swing = bCasting ? (VisCast ? VisCast.Get() : VisAttack.Get())
+		                                : (VisAttack ? VisAttack.Get() : VisCast.Get());
+		PlayVisualAnim(Swing, false);
+		return;
+	}
+	const float Speed = GetVelocity().Size2D();
+	if (Speed > 260.0f)     PlayVisualAnim(VisRun ? VisRun.Get() : VisWalk.Get(), true);
+	else if (Speed > 30.0f) PlayVisualAnim(VisWalk ? VisWalk.Get() : VisRun.Get(), true);
+	else                    PlayVisualAnim(VisIdle ? VisIdle.Get() : VisWalk.Get(), true);
+}
+
 void AEnemyBase::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
@@ -300,6 +416,9 @@ void AEnemyBase::Tick(float DeltaTime)
 
 	// Frostbite: frozen solid — no AI, no movement, no attacks until the thaw timer fires.
 	if (bFrozen) return;
+
+	// Visual-kit pawns pick their single-node anim from the AI state + velocity each tick.
+	if (bVisualDriven) UpdateVisualAnim();
 
 	APlayerController* PC = GetWorld()->GetFirstPlayerController();
 	if (!PC) return;
@@ -437,7 +556,7 @@ void AEnemyBase::TickMelee(float DeltaTime, APawn* Player)
 			EnterState(EEnemyAIState::Windup);
 			PlayAttackAnim(); // visible melee wind-up swing
 			const float WindupMul = bIsFrenzied ? FrenzyWindupMultiplier : 1.0f;
-			StateTimer = WindupDuration * WindupMul;
+			StateTimer = WindupDuration * WindupMul * GetTellDurationMult(); // Feverdream shortens tells
 			RefreshColor();
 			UE_LOG(LogLoopedAI, Verbose, TEXT("Enemy WINDUP (frenzied=%d, dur=%.2f)"), bIsFrenzied ? 1 : 0, StateTimer);
 		}
@@ -711,14 +830,15 @@ void AEnemyBase::RefreshColor()
 	// Default: no glow. Priority of tells: hit-flash > teleport > special > windup > telegraph >
 	// burn > frenzy. Hit-flash RED outranks everything so a player hit always reads.
 	FLinearColor Glow = FLinearColor::Black;
-	if (bHitFlashing)                                   Glow = FLinearColor(5.0f, 0.0f, 0.0f, 1.0f); // bright red hit
-	else if (bFrozen)                                   Glow = FLinearColor(0.3f, 1.8f, 4.5f, 1.0f); // frozen solid — icy HDR blue
+	// Softened 2026-07-07 (Sahar: "color flash needs to be more subtle") — reads, doesn't scream.
+	if (bHitFlashing)                                   Glow = FLinearColor(1.2f, 0.02f, 0.02f, 1.0f); // red hit tick
+	else if (bFrozen)                                   Glow = FLinearColor(0.15f, 0.9f, 2.2f, 1.0f);  // frozen solid — icy blue
 	else if (AIState == EEnemyAIState::TeleportWindup)  Glow = TeleportWindupColor;
 	else if (AIState == EEnemyAIState::SpecialWindup)   Glow = SpecialWindupColor;
 	else if (AIState == EEnemyAIState::Windup)          Glow = WindupColor;
 	else if (bTelegraphInFlight)                        Glow = TelegraphColor;
-	else if (BurnTicksRemaining > 0)                    Glow = FLinearColor(1.5f, 0.45f, 0.0f, 1.0f);
-	else if (ChillStacks > 0)                           Glow = FLinearColor(0.1f, 0.7f, 1.8f, 1.0f); // chill building toward freeze
+	else if (BurnTicksRemaining > 0)                    Glow = FLinearColor(0.7f, 0.2f, 0.0f, 1.0f);
+	else if (ChillStacks > 0)                           Glow = FLinearColor(0.05f, 0.35f, 0.9f, 1.0f); // chill building toward freeze
 	else if (bIsFrenzied)                               Glow = FrenzyColor;
 
 	OverlayMID->SetVectorParameterValue(TEXT("OverlayColor"), Glow);
@@ -766,12 +886,12 @@ void AEnemyBase::RefreshSpeed()
 	if (VenomTicksRemaining > 0)                  S *= VenomSlowMultiplier;
 	if (AIState == EEnemyAIState::Lunge)          S *= LungeSpeedMultiplier;
 
-	// Curse "Marked": the player's run is cursed — enemies hunt faster.
+	// Curse "Marked": the player's run is cursed — enemies hunt faster (Iron Will softens it).
 	if (const UWorld* World = GetWorld())
 	{
 		if (const ULoopedGameInstance* GI = World->GetGameInstance<ULoopedGameInstance>())
 		{
-			if (GI->HasCurse(TEXT("Marked"))) S *= GI->CurseMarkedEnemySpeedMult;
+			if (GI->HasCurse(TEXT("Marked"))) S *= GI->ScaleCurseMult(GI->CurseMarkedEnemySpeedMult);
 		}
 	}
 
@@ -794,22 +914,78 @@ void AEnemyBase::TakeDamageFromPlayer(float Damage, AActor* DamageSource)
 	{
 		Damage *= PlayerGI->GetArtifactDamageMult();
 
-		// Curse "Weakness": the player's outgoing damage is dulled this run.
+		// Curse "Weakness": the player's outgoing damage is dulled this run (Iron Will softens it).
 		if (PlayerGI->HasCurse(TEXT("Weakness")))
 		{
-			Damage *= PlayerGI->CurseWeaknessDamageMult;
+			Damage *= PlayerGI->ScaleCurseMult(PlayerGI->CurseWeaknessDamageMult);
 		}
 
+		const ALoopedCharacter* LC = Cast<ALoopedCharacter>(UGameplayStatics::GetPlayerCharacter(this, 0));
+
 		// Run relic "BerserkerFetish": hit harder while near death (bespoke hook, like Wing/GoldBar).
-		if (PlayerGI->HasRunArtifact(TEXT("BerserkerFetish")))
+		if (LC && PlayerGI->HasRunArtifact(TEXT("BerserkerFetish")) &&
+			LC->GetPOCHealthPercent() <= PlayerGI->BerserkerHPThreshold)
 		{
-			if (const ALoopedCharacter* LC = Cast<ALoopedCharacter>(UGameplayStatics::GetPlayerCharacter(this, 0)))
+			Damage *= PlayerGI->BerserkerDamageMult;
+		}
+
+		// Card "Overcharge": the mirror of Berserker — hit harder while UNTOUCHED (full HP).
+		if (LC && LC->GetPOCHealthPercent() >= 0.999f)
+		{
+			if (const FPassiveCardLevel* OverLv = PlayerGI->GetEffectiveLevelData(TEXT("Overcharge")))
 			{
-				if (LC->GetPOCHealthPercent() <= PlayerGI->BerserkerHPThreshold)
-				{
-					Damage *= PlayerGI->BerserkerDamageMult;
-				}
+				Damage *= 1.0f + OverLv->Fraction;
 			}
+		}
+
+		// Card "GlassCannon": more damage dealt (the taken side lives in TakeDamageFromEnemy).
+		if (const FPassiveCardLevel* GlassLv = PlayerGI->GetEffectiveLevelData(TEXT("GlassCannon")))
+		{
+			Damage *= 1.0f + GlassLv->Fraction;
+		}
+
+		// Card "Rupture": afflicted enemies (burning / venomed / chilled / frozen) tear open.
+		if (const FPassiveCardLevel* RuptLv = PlayerGI->GetEffectiveLevelData(TEXT("Rupture")))
+		{
+			const bool bAfflicted = BurnTicksRemaining > 0 || VenomTicksRemaining > 0 || ChillStacks > 0 || bFrozen;
+			if (bAfflicted)
+			{
+				Damage *= 1.0f + RuptLv->Fraction;
+			}
+		}
+
+		// Card "Executioner": enemies below the HP threshold take heavily amplified damage.
+		if (const FPassiveCardLevel* ExecLv = PlayerGI->GetEffectiveLevelData(TEXT("Executioner")))
+		{
+			if (ExecLv->Threshold > 0.0f && GetHealthPercent() <= ExecLv->Threshold)
+			{
+				Damage *= 1.0f + FMath::Max(0.0f, ExecLv->Fraction);
+			}
+		}
+
+		// Card "HuntersMark": a marked enemy takes bonus damage from EVERYTHING. The first hit
+		// applies the mark (no bonus yet); every later source benefits.
+		if (const FPassiveCardLevel* MarkLv = PlayerGI->GetEffectiveLevelData(TEXT("HuntersMark")))
+		{
+			if (bMarkedByHunter)
+			{
+				Damage *= 1.0f + MarkLv->Fraction;
+			}
+			bMarkedByHunter = true;
+		}
+
+		// Relic "TrophyFang": bonus damage vs frenzied enemies (permanent, achievement-gated).
+		if (bIsFrenzied && PlayerGI->HasArtifact(TEXT("TrophyFang")))
+		{
+			Damage *= PlayerGI->TrophyFangFrenzyMult;
+		}
+
+		// Relic "ScarLedger": lifetime damage compounds into power — +1% per 25k dealt, capped.
+		if (PlayerGI->HasArtifact(TEXT("ScarLedger")) && PlayerGI->Stats)
+		{
+			const float Steps = FMath::FloorToFloat(PlayerGI->Stats->TotalDamageDealt / FMath::Max(1.0f, PlayerGI->ScarLedgerDamageStep));
+			const float Bonus = FMath::Min(PlayerGI->ScarLedgerMaxBonus, Steps * PlayerGI->ScarLedgerStepBonus);
+			Damage *= 1.0f + Bonus;
 		}
 	}
 
@@ -830,7 +1006,13 @@ void AEnemyBase::TakeDamageFromPlayer(float Damage, AActor* DamageSource)
 
 	if (HPBarWidget)
 	{
-		if (UUserWidget* Widget = HPBarWidget->GetWidget())
+		// Curse "ShatteredSight": enemy health is hidden — the bar stays dark all run.
+		const ULoopedGameInstance* SightGI = GetGameInstance<ULoopedGameInstance>();
+		if (SightGI && SightGI->HasCurse(TEXT("ShatteredSight")))
+		{
+			HPBarWidget->SetVisibility(false);
+		}
+		else if (UUserWidget* Widget = HPBarWidget->GetWidget())
 		{
 			if (UProgressBar* Bar = Cast<UProgressBar>(Widget->GetWidgetFromName(TEXT("HPBar"))))
 			{
@@ -879,6 +1061,56 @@ void AEnemyBase::Die()
 
 	// Death pop: AoE damage to nearby allies before we go down
 	DeathPop();
+
+	if (ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
+	{
+		// Curse "Bounty": every kill rings out — the WHOLE room comes alerted.
+		if (GI->HasCurse(TEXT("Bounty")))
+		{
+			AlertNearbyEnemies(this, /*bRoomWide*/ true);
+			UE_LOG(LogLoopedAI, Display, TEXT("[Curse] Bounty — kill alerted the whole room."));
+		}
+
+		// Card "Detonate": a burning corpse goes up — AoE damage to everything near it. Inlined
+		// (ApplyChainSparkEffect early-outs on dead enemies, and this one is mid-death). Damage
+		// routes through TakeDamageFromPlayer, so multipliers apply and chained kills re-enter
+		// Die safely via the bIsDying guard.
+		if (BurnTicksRemaining > 0)
+		{
+			if (const FPassiveCardLevel* DetLv = GI->GetEffectiveLevelData(TEXT("Detonate")))
+			{
+				if (DetLv->Damage > 0.0f && DetLv->Radius > 0.0f)
+				{
+					const FVector BlastLoc = GetActorLocation();
+					for (TActorIterator<AEnemyBase> It(GetWorld()); It; ++It)
+					{
+						AEnemyBase* Other = *It;
+						if (!Other || Other == this || !Other->IsAlive()) continue;
+						if (FVector::Dist(BlastLoc, Other->GetActorLocation()) <= DetLv->Radius)
+						{
+							Other->TakeDamageFromPlayer(DetLv->Damage, this);
+						}
+					}
+					UE_LOG(LogLoopedAI, Display, TEXT("[Card] Detonate — burning corpse exploded (%.0f dmg, %.0f uu)."),
+						DetLv->Damage, DetLv->Radius);
+				}
+			}
+		}
+
+		// Curse "Haunted": one enemy per room refuses to stay dead. Claim the room's single
+		// rise token from the GameMode, then get back up after a short delay.
+		if (!bHauntedRespawnUsed && !bIsBoss && GI->HasCurse(TEXT("Haunted")))
+		{
+			if (ALoopedRunGameMode* HauntGM = Cast<ALoopedRunGameMode>(UGameplayStatics::GetGameMode(this)))
+			{
+				if (HauntGM->TryConsumeHauntedToken())
+				{
+					bHauntedRespawnUsed = true;
+					GetWorldTimerManager().SetTimer(HauntedRiseTimerHandle, this, &AEnemyBase::HauntedRise, 2.5f, false);
+				}
+			}
+		}
+	}
 
 	// Fire gameplay events IMMEDIATELY so room-clear timing is driven by the kill, not the corpse anim.
 	OnEnemyDied.Broadcast(this);
@@ -949,6 +1181,13 @@ void AEnemyBase::FinishDeathHide()
 
 float AEnemyBase::PlayDeathAnim()
 {
+	// Visual-kit pawns die in their own skin: single-node Death sequence, last pose held.
+	if (bVisualDriven && VisDeath && GetMesh())
+	{
+		CurrentVisAnim = VisDeath;
+		GetMesh()->PlayAnimation(VisDeath, false);
+		return VisDeath->GetPlayLength();
+	}
 	if (DeathAnims.Num() == 0 || !GetMesh()) return 0.0f;
 	UAnimInstance* AnimInst = GetMesh()->GetAnimInstance();
 	if (!AnimInst) return 0.0f;
@@ -978,6 +1217,7 @@ void AEnemyBase::Respawn()
 	VenomTicksRemaining = 0;
 	ChillStacks = 0;
 	bFrozen = false;
+	bMarkedByHunter = false; // Hunter's Mark does not survive a respawn
 	SpecialShotsRemaining = 0;
 	NextSpecialReadyTime = 0.0f;
 	NextTeleportReadyTime = 0.0f;
@@ -986,7 +1226,12 @@ void AEnemyBase::Respawn()
 	MaxHealthCached = POCHealth;
 	SetActorHiddenInGame(false);
 	SetActorEnableCollision(true);
-	if (HPBarWidget) HPBarWidget->SetVisibility(true);
+	if (HPBarWidget)
+	{
+		// Curse "ShatteredSight": bars stay hidden even through a respawn.
+		const ULoopedGameInstance* SightGI = GetGameInstance<ULoopedGameInstance>();
+		HPBarWidget->SetVisibility(!(SightGI && SightGI->HasCurse(TEXT("ShatteredSight"))));
+	}
 	GetCharacterMovement()->SetMovementMode(EMovementMode::MOVE_Walking);
 
 	// Clear the dying flag + pending corpse-hide, and un-ragdoll the mesh back to its rig pose.
@@ -1118,14 +1363,24 @@ void AEnemyBase::ApplyCryoEffect(float FreezeDuration)
 	if (!IsAlive()) return;
 	if (bFrozen) return; // no freeze-lock chaining — chill only counts again after the thaw
 
+	// Blessing "FrostSigil": the freeze needs one fewer stack (min 1) this run.
+	int32 StacksNeeded = ChillStacksToFreeze;
+	if (const ULoopedGameInstance* SigilGI = GetGameInstance<ULoopedGameInstance>())
+	{
+		if (SigilGI->HasRunArtifact(TEXT("FrostSigil")))
+		{
+			StacksNeeded = FMath::Max(1, StacksNeeded - 1);
+		}
+	}
+
 	ChillStacks++;
 	// Stacks decay if not refreshed: chill pressure must be sustained to reach the freeze.
 	GetWorldTimerManager().SetTimer(ChillDecayTimerHandle, this, &AEnemyBase::DecayChillStacks, FMath::Max(0.1f, ChillStackDecaySeconds), false);
 
-	if (ChillStacks < ChillStacksToFreeze)
+	if (ChillStacks < StacksNeeded)
 	{
 		RefreshColor();
-		UE_LOG(LogLoopedAI, Display, TEXT("Chill stack %d/%d"), ChillStacks, ChillStacksToFreeze);
+		UE_LOG(LogLoopedAI, Display, TEXT("Chill stack %d/%d"), ChillStacks, StacksNeeded);
 		return;
 	}
 
@@ -1145,6 +1400,18 @@ void AEnemyBase::EndFreeze()
 	bFrozen = false;
 	RefreshSpeed();
 	RefreshColor();
+}
+
+void AEnemyBase::HauntedRise()
+{
+	// Curse "Haunted": the corpse claws back up at half health, already furious.
+	if (!bIsDying) return; // respawned/reset by something else in the meantime
+	Respawn();
+	CurrentHealth = FMath::Max(1.0f, MaxHealthCached * 0.5f);
+	bIsAlerted = true;
+	RefreshSpeed();
+	RefreshColor();
+	UE_LOG(LogLoopedAI, Display, TEXT("[Curse] Haunted — enemy ROSE at %.0f HP."), CurrentHealth);
 }
 
 void AEnemyBase::DecayChillStacks()
@@ -1246,7 +1513,16 @@ FVector AEnemyBase::ComputeFlankPoint(const APawn* Player) const
 void AEnemyBase::CheckEnterFrenzy()
 {
 	if (bIsFrenzied) return;
-	if (GetHealthPercent() <= FrenzyHPThreshold)
+	// Curse "Cowardice": enemies panic early — frenzy triggers at a much higher HP fraction.
+	float Threshold = FrenzyHPThreshold;
+	if (const ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
+	{
+		if (GI->HasCurse(TEXT("Cowardice")))
+		{
+			Threshold = FMath::Max(Threshold, GI->CurseCowardiceFrenzyHP);
+		}
+	}
+	if (GetHealthPercent() <= Threshold)
 	{
 		bIsFrenzied = true;
 		RefreshSpeed();
@@ -1255,12 +1531,33 @@ void AEnemyBase::CheckEnterFrenzy()
 	}
 }
 
+float AEnemyBase::GetTellDurationMult() const
+{
+	// Curse "Feverdream": every attack tell (windup / telegraph / special) comes faster.
+	if (const ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
+	{
+		if (GI->HasCurse(TEXT("Feverdream")))
+		{
+			// Iron Will pulls the tell time back toward normal.
+			return GI->ScaleCurseMult(GI->CurseFeverdreamTellMult);
+		}
+	}
+	return 1.0f;
+}
+
 void AEnemyBase::CheckEnterPhase2()
 {
 	if (bIsPhase2 || !bIsBoss) return;
 	if (GetHealthPercent() > Phase2HPThreshold) return;
 
 	bIsPhase2 = true;
+
+	// The Warlord sheds its shell: if a "_P2" visual kit exists for the current look, swap the
+	// mesh + moveset LIVE — the transformation IS the phase tell. Stats untouched by design.
+	if (bVisualDriven && !CurrentVisualRow.IsNone())
+	{
+		ApplyEnemyVisual(FName(*(CurrentVisualRow.ToString() + TEXT("_P2"))));
+	}
 
 	// Visible transformation: base color shifts to deep red so the player SEES the boss change.
 	EnemyColor = Phase2BaseColor;
@@ -1379,7 +1676,7 @@ void AEnemyBase::EndPostTeleportMeleeMode()
 	UE_LOG(LogLoopedAI, Display, TEXT("Boss melee window ended — back to ranged."));
 }
 
-void AEnemyBase::AlertNearbyEnemies(AActor* Cause)
+void AEnemyBase::AlertNearbyEnemies(AActor* Cause, bool bRoomWide)
 {
 	const FVector MyLoc = GetActorLocation();
 	for (TActorIterator<AEnemyBase> It(GetWorld()); It; ++It)
@@ -1387,7 +1684,7 @@ void AEnemyBase::AlertNearbyEnemies(AActor* Cause)
 		AEnemyBase* Other = *It;
 		if (!Other || Other == this || !Other->IsAlive()) continue;
 		const float D = FVector::Dist(Other->GetActorLocation(), MyLoc);
-		if (D <= AlertRadius && !Other->bIsAlerted)
+		if ((bRoomWide || D <= AlertRadius) && !Other->bIsAlerted)
 		{
 			Other->bIsAlerted = true;
 			Other->RefreshSpeed();
@@ -1409,8 +1706,9 @@ void AEnemyBase::BeginTelegraph()
 	// NOTE: no melee swing here — ranged enemies get a proper fire/cast gesture in Fix #2 (with the
 	// projectile). For now the telegraph reads via the windup color tell.
 	RefreshColor();
-	UE_LOG(LogLoopedAI, Verbose, TEXT("Ranged TELEGRAPH begin (dur=%.2f)"), TelegraphDuration);
-	GetWorldTimerManager().SetTimer(TelegraphTimerHandle, this, &AEnemyBase::FireTelegraphedShot, TelegraphDuration, false);
+	const float TellDur = TelegraphDuration * GetTellDurationMult(); // Feverdream shortens tells
+	UE_LOG(LogLoopedAI, Verbose, TEXT("Ranged TELEGRAPH begin (dur=%.2f)"), TellDur);
+	GetWorldTimerManager().SetTimer(TelegraphTimerHandle, this, &AEnemyBase::FireTelegraphedShot, TellDur, false);
 }
 
 void AEnemyBase::FireTelegraphedShot()
@@ -1437,10 +1735,11 @@ void AEnemyBase::BeginSpecialAttack()
 	AIState = EEnemyAIState::SpecialWindup;
 	// Tell is the bright-magenta SpecialWindup glow — boss is CHARGING Skyfall.
 	RefreshColor();
-	UE_LOG(LogLoopedAI, Display, TEXT("Boss: SpecialWindup (will fire %d shots in %.2fs)"), SpecialBurstShots, SpecialWindupDuration);
+	const float SpecialDur = SpecialWindupDuration * GetTellDurationMult(); // Feverdream shortens tells
+	UE_LOG(LogLoopedAI, Display, TEXT("Boss: SpecialWindup (will fire %d shots in %.2fs)"), SpecialBurstShots, SpecialDur);
 
 	// After windup, enter the burst phase and fire shots on an interval timer.
-	GetWorldTimerManager().SetTimer(SpecialTimerHandle, this, &AEnemyBase::OnSpecialWindupFinished, SpecialWindupDuration, false);
+	GetWorldTimerManager().SetTimer(SpecialTimerHandle, this, &AEnemyBase::OnSpecialWindupFinished, SpecialDur, false);
 }
 
 void AEnemyBase::OnSpecialWindupFinished()
@@ -1454,6 +1753,14 @@ void AEnemyBase::OnSpecialWindupFinished()
 	}
 	AIState = EEnemyAIState::SpecialBurst;
 	SpecialShotsRemaining = FMath::Max(1, SpecialBurstShots);
+	// Relic "Crown" (of the Looped): a proven Hunter reads the Skyfall — one fewer volley shot.
+	if (const ULoopedGameInstance* CrownGI = GetGameInstance<ULoopedGameInstance>())
+	{
+		if (CrownGI->HasArtifact(TEXT("Crown")))
+		{
+			SpecialShotsRemaining = FMath::Max(1, SpecialShotsRemaining - 1);
+		}
+	}
 	RefreshColor();
 
 	// Fire first shot immediately, then space subsequent shots on an interval timer

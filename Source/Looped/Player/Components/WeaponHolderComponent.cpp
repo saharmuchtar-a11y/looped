@@ -127,6 +127,12 @@ void UWeaponHolderComponent::FireWeapon()
 {
 	if (!bIsFiring) return;
 
+	// The hero body swings/charges with every shot — the hit is finally VISIBLE.
+	if (ALoopedCharacter* HeroLC = Cast<ALoopedCharacter>(GetOwner()))
+	{
+		HeroLC->PlayHeroAttackAnim(CachedWeaponData.HitType == EHitType::Melee);
+	}
+
 	switch (CachedWeaponData.HitType)
 	{
 	case EHitType::Melee:
@@ -146,19 +152,25 @@ float UWeaponHolderComponent::ComputeAttackDamage(bool& bOutCrit) const
 	bOutCrit = false;
 	float OutDamage = CachedWeaponData.BaseDamage * DamageMultiplier;
 
-	// Deadeye card: chance for this hit to crit, values from the equipped card's per-level row
-	// (Brittle-adjusted via GetEffectiveLevelData — same source as every other card effect).
+	// Crit roll: Deadeye card chance (Brittle-adjusted) + the Whetstone blessing's flat bonus.
+	// Whetstone works alone (no Deadeye equipped) at the default x2 multiplier.
 	if (const UWorld* World = GetWorld())
 	{
 		if (const ULoopedGameInstance* GI = World->GetGameInstance<ULoopedGameInstance>())
 		{
-			if (const FPassiveCardLevel* Lv = GI->GetEffectiveLevelData(TEXT("Deadeye")))
+			// Curse "DullBlade": crits simply do not happen this run.
+			if (GI->HasCurse(TEXT("DullBlade")))
 			{
-				if (Lv->CritChance > 0.0f && FMath::FRand() < Lv->CritChance)
-				{
-					OutDamage *= FMath::Max(1.0f, Lv->CritMultiplier);
-					bOutCrit = true;
-				}
+				return OutDamage;
+			}
+
+			const FPassiveCardLevel* Lv = GI->GetEffectiveLevelData(TEXT("Deadeye"));
+			const float CritChance = (Lv ? Lv->CritChance : 0.0f) + GI->GetArtifactCritChance();
+			const float CritMult = Lv ? Lv->CritMultiplier : 2.0f;
+			if (CritChance > 0.0f && FMath::FRand() < CritChance)
+			{
+				OutDamage *= FMath::Max(1.0f, CritMult);
+				bOutCrit = true;
 			}
 		}
 	}

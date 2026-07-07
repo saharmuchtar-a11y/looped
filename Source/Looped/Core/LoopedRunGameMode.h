@@ -41,14 +41,31 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|Run")
 	void SpawnHubPortal(FName Destination = FName(TEXT("L_Hub")));
 
+	// FLOORS: mid-run boss kill — spawns the labeled "DESCEND" portal into the next floor's
+	// first room. Unlike SpawnHubPortal this does NOT end the run path (the descent continues it).
+	void SpawnDescentPortal(FName Destination);
+
 	UFUNCTION(BlueprintPure, Category = "LOOPED|Run")
 	int32 GetCurrentRoom() const { return CurrentRoomIndex; }
 
 	UFUNCTION(BlueprintPure, Category = "LOOPED|Run")
 	int32 GetTotalRooms() const { return TotalRoomsInFloor; }
 
+	// Curse "Haunted": one rise per room. The dying enemy claims the token; first claim wins.
+	bool TryConsumeHauntedToken();
+
 protected:
 	virtual void BeginPlay() override;
+
+	// --- Tutorial routing (first launch) ---
+	// A save that never received the monitor-gate artifact is brand new: entering the Hub
+	// bounces it to the tutorial, where Orin's rescue grants the artifact. Legacy saves get
+	// the artifact migrated on load, so only genuinely fresh saves route. None = routing off.
+	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|Tutorial")
+	FName TutorialGateArtifact = TEXT("Orin");
+
+	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|Tutorial")
+	FName TutorialLevelName = TEXT("L_Tutorial");
 
 	void EnsureNavMeshExists();
 
@@ -123,4 +140,12 @@ private:
 	// Guards the persistent RoomClears stat to exactly one increment per room clear.
 	// Reset in RespawnAllEnemies() so a re-fought room can count again.
 	bool bRoomClearCounted = false;
+
+	// Curse "Haunted": the room's single rise token (GameMode = per-level lifetime = per-room).
+	bool bHauntedTokenUsed = false;
+
+	// Curse "Swarm": clones one placed enemy per CurseSwarmExtraEnemies at a nav point away from
+	// the player. Deferred a beat past BeginPlay so placed enemies + player pawn exist.
+	void SpawnSwarmEnemies();
+	FTimerHandle SwarmSpawnTimerHandle;
 };

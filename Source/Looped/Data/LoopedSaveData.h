@@ -81,6 +81,10 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")
 	TSet<FName> PerksEverMaxed;
 
+	// Relics sold to Vorr — blacklisted from milestone auto-grants (the sale must stick).
+	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")
+	TArray<FName> SoldRelics;
+
 	// Permanent cross-run artifacts the player owns (e.g. "Wing"). Apply effects at run start.
 	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")
 	TSet<FName> OwnedArtifacts;
@@ -114,6 +118,28 @@ public:
 	// Vault meta "Keepsake": every run begins with one random Blessing.
 	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")
 	bool bPermanentStartingBlessing = false;
+
+	// Serin's ransom sting: the curse Vorr stamps on your NEXT run (applied + cleared at run
+	// start, like PendingNextRunCards). None = nothing owed.
+	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")
+	FName PendingNextRunCurse;
+
+	// Mira's rescue: fragments gathered so far across all runs. She reforms (artifact "Mira"
+	// granted) at ULoopedGameInstance::MiraFragmentsNeeded.
+	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")
+	int32 MiraFragments = 0;
+
+	// Lifetime enemy kills (bosses included) — drives kill-count unlocks (Echo at 150).
+	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")
+	int32 TotalEnemyKills = 0;
+
+	// Chrono-skill training ranks bought from Lysa (each = +SkillGaugePerRankSeconds, forever).
+	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")
+	int32 SkillGaugeRanks = 0;
+
+	// Lifetime Shards spent (merchant cache, tolls, ...) — gates the "VorrsMarker" relic.
+	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")
+	int32 TotalShardsSpent = 0;
 
 	// Schema version — bump if fields change in a load-breaking way (currently 1).
 	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")

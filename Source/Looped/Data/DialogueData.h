@@ -30,7 +30,20 @@ enum class EDialogueOutcome : uint8
 	CleanseCurse    UMETA(DisplayName = "Cleanse Random Curse"),
 	// Vorr's Casino: wagers OutcomeAmount Shards — 45% win (double back), 45% lose it,
 	// 10% JACKPOT (triple back). Button locks if the player can't cover the wager.
-	GambleShards    UMETA(DisplayName = "Gamble Shards (OutcomeAmount = wager)")
+	GambleShards    UMETA(DisplayName = "Gamble Shards (OutcomeAmount = wager)"),
+
+	// --- Casino 2.0: each machine plays a REAL game (result rides the gold result line) ---
+	// Slots: 3 weighted reels (SKULL/BELL/EYE/VOID). Pair 1.5x, triple 5x, triple VOID 10x.
+	SlotSpin        UMETA(DisplayName = "Slot Spin (OutcomeAmount = wager)"),
+	// Roulette: OutcomeId = "Red"/"Black" (18/37, pays 2x) or "Green" (1/37, pays 10x).
+	RouletteBet     UMETA(DisplayName = "Roulette Bet (OutcomeId = color, OutcomeAmount = wager)"),
+	// Blackjack (state lives on the trigger between choices): Deal takes the wager and draws;
+	// Hit draws again (bust ends); Stand plays the dealer to 17. Win 2x, natural 21 pays 2.5x.
+	BlackjackDeal   UMETA(DisplayName = "Blackjack: Deal (OutcomeAmount = wager)"),
+	BlackjackHit    UMETA(DisplayName = "Blackjack: Hit"),
+	BlackjackStand  UMETA(DisplayName = "Blackjack: Stand"),
+	// The barkeep's bet: call it — 50/50 double or nothing.
+	CoinFlip        UMETA(DisplayName = "Coin Flip (OutcomeAmount = wager)")
 };
 
 // One selectable option on a dialogue node.
@@ -50,6 +63,11 @@ struct FDialogueChoice
 	// What this choice grants/costs when picked.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Dialogue")
 	EDialogueOutcome Outcome = EDialogueOutcome::None;
+
+	// TRUE = this choice can fire only ONCE per room load (the bar's heals — no infinite
+	// drinking). Tracked per trigger by choice text; resets when the level reloads.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Choice")
+	bool bOncePerRoom = false;
 
 	// Id for outcomes that need one (curse id / artifact id). Ignored otherwise.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Dialogue")

@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Data/TreasureTypes.h"
+#include "Core/LoopedInteractable.h"
 #include "TreasureChest.generated.h"
 
 class USceneComponent;
@@ -10,16 +11,25 @@ class UBoxComponent;
 class UStaticMeshComponent;
 class UWidgetComponent;
 
-// One pedestal in a treasure room. Rolls + displays its offer on BeginPlay. On player overlap it
-// accepts the offer (draft: overlap = accept; an [Accept] UI can call AcceptPedestal() later),
-// grants the reward, and — once the room's pick budget is spent — LOCKS its siblings (N of X).
+// One pedestal in a treasure room. Rolls + displays its offer on BeginPlay. Claiming is a
+// DELIBERATE press-E (ILoopedInteractable) — walking near no longer grabs it, which matters a
+// lot in Dark Treasure rooms where every pedestal is a cursed bargain. Grants the reward and —
+// once the room's pick budget is spent — LOCKS its siblings (N of X).
 UCLASS(Blueprintable)
-class LOOPED_API ATreasureChest : public AActor
+class LOOPED_API ATreasureChest : public AActor, public ILoopedInteractable
 {
 	GENERATED_BODY()
 
 public:
 	ATreasureChest();
+
+	// Press-E claim: same guards the old walk-in accept used.
+	virtual void Interact(class ALoopedCharacter* Player) override;
+	virtual float GetInteractRange() const override { return 260.0f; }
+	virtual FText GetInteractPrompt() const override
+	{
+		return (bTaken || bLocked) ? FText::GetEmpty() : FText::FromString(TEXT("claim this offer"));
+	}
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Treasure")
 	ETreasureRewardType RewardType = ETreasureRewardType::CleanRelic;

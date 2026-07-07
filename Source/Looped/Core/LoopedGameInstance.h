@@ -5,6 +5,7 @@
 #include "Data/PassiveCardData.h"
 #include "Data/RoomRouting.h"
 #include "Data/ArtifactData.h"
+#include "Data/MissionData.h"
 #include "LoopedGameInstance.generated.h"
 
 class ULoopedSaveData;
@@ -26,6 +27,15 @@ struct FRunState
 	// Once-per-run companion relic tokens (rescue system). Reset with the rest of the run state.
 	bool bSecondWindUsed = false;      // Lysa — survive one lethal hit at 1 HP
 	bool bCardRerollUsed = false;      // Mira — reroll one card reward
+	bool bMiraFragmentTaken = false;   // Mira's rescue — one fragment per run (the reset scatters her again)
+
+	// Q chrono-skill gauge (seconds left), carried between rooms like health. -1 = not yet
+	// seeded this run (the Character fills it to max on first spawn).
+	float SkillGauge = -1.0f;
+
+	// Wave-2 once-per-run tokens. Reset with the rest of the run state.
+	bool bHexwardUsed = false;           // blessing "Hexward" — deflects the first curse of the run
+	bool bMarkerMerchantOffered = false; // relic "VorrsMarker" — merchant fork already forced this run
 };
 
 UCLASS()
@@ -61,6 +71,11 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|Stats")
 	void AddRoomClear();
+
+	// One per enemy death (bosses too). No per-kill disk write — the count rides the frequent
+	// room-clear saves; UnlockCard saves the instant a kill threshold actually fires.
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Stats")
+	void AddEnemyKill();
 
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|Stats")
 	void AddRunCompleted();
@@ -140,6 +155,64 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Artifacts")
 	float BerserkerHPThreshold = 0.3f;
 
+	// --- Wave-2 bespoke artifact tunables (each keyed on its row name, like Berserker above) ---
+	// Blessing "LootersEye": flat Shards granted per enemy kill.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Artifacts")
+	int32 LootersEyeShardsPerKill = 1;
+
+	// Blessing "LeechFang": flat HP healed per enemy kill.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Artifacts")
+	float LeechFangHealPerKill = 1.0f;
+
+	// Blessing "VoidLens": "?" rooms treat the treasure share as at least this.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Artifacts")
+	float VoidLensTreasureShare = 0.45f;
+
+	// Blessing "Hourglass": bullet-time target dilation is multiplied by this (lower = stronger).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Artifacts")
+	float HourglassDilationMult = 0.8f;
+
+	// Relic "Chronometer": fraction of run Shards converted to Echoes on death.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Artifacts")
+	float ChronometerConvertFraction = 0.1f;
+
+	// Relic "TrophyFang": outgoing damage x this vs frenzied enemies.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Artifacts")
+	float TrophyFangFrenzyMult = 1.1f;
+
+	// Relic "ScarLedger": +ScarLedgerStepBonus per ScarLedgerDamageStep lifetime damage, capped.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Artifacts")
+	float ScarLedgerDamageStep = 25000.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Artifacts")
+	float ScarLedgerStepBonus = 0.01f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Artifacts")
+	float ScarLedgerMaxBonus = 0.10f;
+
+	// Relic "IronWill": curse severities are scaled by this (their delta from neutral shrinks).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Artifacts")
+	float IronWillSeverityMult = 0.75f;
+
+	// Iron Will helper: 1.0 without the relic, IronWillSeverityMult with it. Callers scale a
+	// curse's DELTA from neutral by this (see ScaleCurseMult below for multiplier-style curses).
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Artifacts")
+	float GetCurseSeverityMult() const;
+
+	// Scales a multiplier-style curse magnitude toward 1.0 by the Iron Will factor:
+	// e.g. Frailty 1.5 -> 1.375 with Iron Will. Works for <1 multipliers too (0.75 -> 0.8125).
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Artifacts")
+	float ScaleCurseMult(float RawMult) const { return 1.0f + (RawMult - 1.0f) * GetCurseSeverityMult(); }
+
+	// All permanent artifacts by id (the merchant's SELL page lists these minus keepsakes).
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Artifacts")
+	TArray<FName> GetOwnedArtifactNames() const;
+
+	// Vorr buys a permanent relic: removed from the save + blacklisted from milestone re-grants.
+	// Returns false if not owned. Payout is the CALLER's business (the shop adds the Echoes).
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Artifacts")
+	bool SellPermanentArtifact(FName ArtifactName);
+
 	// Console test-grant: open the ~ console and type e.g. "GrantArtifactCheat Wing".
 	UFUNCTION(Exec)
 	void GrantArtifactCheat(FName ArtifactName);
@@ -190,6 +263,17 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|Currency")
 	void ClearPendingNextRunCards();
+
+	// Vorr's SELL page: refund a single queued boon. True if it was queued (and is now removed).
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Currency")
+	bool RemovePendingNextRunCard(FName Card);
+
+	// --- Serin's ransom: a curse owed on the NEXT run (Vorr always takes a cruelty on top) ---
+	// Bodies live in the .cpp — ULoopedSaveData is only forward-declared here.
+	void QueueNextRunCurse(FName Curse);
+
+	// Returns the owed curse and clears the debt (call once at run start).
+	FName TakePendingNextRunCurse();
 
 	// DEV: wipe the entire save back to fresh (Echoes, artifacts, unlocks, stats, ever-maxed).
 	// Also resets the live run perks. Bound to the merchant's "RESET SAVE (DEV)" button.
@@ -271,6 +355,37 @@ public:
 
 	// ("Static" — card effects only fire every other landed hit — has no magnitude; the
 	//  hit-parity logic lives in ALoopedCharacter::OnPlayerHitEnemy.)
+
+	// --- Wave-2 curse tunables ---
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Curses")
+	int32 CurseTollShards = 3;             // "Toll"       — Shards charged on entering each run room
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Curses")
+	float CurseTollHPFallback = 5.0f;      // "Toll"       — HP paid instead when you can't afford it
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Curses")
+	float CurseCowardiceFrenzyHP = 0.5f;   // "Cowardice"  — enemies frenzy at this HP fraction (vs 0.25)
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Curses")
+	float CurseFeverdreamTellMult = 0.7f;  // "Feverdream" — windup/telegraph durations x this
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Curses")
+	float CurseExtortionPriceMult = 1.25f; // "Extortion"  — Vorr's cache prices x this
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Curses")
+	int32 CurseSwarmExtraEnemies = 1;      // "Swarm"      — extra enemies cloned into each combat room
+
+	// ("DullBlade" — crits disabled; "ShatteredSight" — enemy HP bars hidden; "Bounty" — kills
+	//  alert the whole room; "Amnesia" — draft descriptions hidden; "Fogbound" — fork portal
+	//  labels blanked; "Haunted" — one enemy per room rises once. No magnitudes.)
+
+	// Charges the Toll curse for entering a run room (Shards first, HP fallback via the player).
+	// Called by the GameMode on run-room entry; no-op without the curse.
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Curses")
+	void ApplyRoomEntryToll();
+
+	// Relic "Chronometer": converts a cut of run Shards to Echoes at the moment of death.
+	void ApplyChronometerOnDeath();
 
 	// Card-reward choices to offer. Base 3, + permanent vault bonus, - 1 if "Scarcity" cursed.
 	// The card-reward Blueprint should read this when building the offer.
@@ -363,11 +478,40 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|Perks")
 	TArray<FName> GetEligibleCards(const TArray<FName>& InAll) const;
 
-	// The cards to OFFER for one card-reward: N distinct eligible cards drawn from InPool,
-	// where N = GetCardChoiceCount() clamped to how many are eligible. Drives the adaptive
-	// card-reward menu (Foresight +1 / Scarcity -1). Returns 1..4 names (or fewer if the pool is small).
+	// The cards to OFFER for one card-reward: N = GetCardChoiceCount() names, rolled from the
+	// eligible pool with RARITY WEIGHTING (Commons are the bread, Epics the jackpot), distinct
+	// while the pool allows it, padded with repeats when it doesn't (repeats beat "None" slots
+	// on screen). The BP manager displays exactly offer[0..N-1] — this roll IS the draft.
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|Perks")
 	TArray<FName> GetCardOffer(const TArray<FName>& InPool) const;
+
+	// Relative offer weights per rarity tier (per-card, before normalization). Cursed never rolls.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Perks")
+	int32 OfferWeightCommon = 60;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Perks")
+	int32 OfferWeightRare = 30;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Perks")
+	int32 OfferWeightEpic = 10;
+
+	// All card row ids in table order — lets shops/catalogues stay data-driven off the DT.
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Perks")
+	TArray<FName> GetAllCardIds() const;
+
+	// True if the card needs a meta unlock (bRequiresUnlock) — the shop only stocks these.
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Perks")
+	bool IsCardGated(FName CardId) const;
+
+	// DisplayName from the row (falls back to the id) — for shop/codex lines.
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Perks")
+	FText GetCardDisplayName(FName CardId) const;
+
+	// UI color for a rarity tier (Common silver / Rare azure / Epic violet / Cursed blood).
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Perks")
+	static FLinearColor GetRarityColor(ECardRarity Rarity);
+
+	// (free function below the class) Player-facing tier word — "COMMON" / "RARE" / "EPIC".
 
 	// Returns a player-friendly label for the card UI, e.g. "BurnShot — Lv 1 → 2" or "BurnShot — NEW".
 	UFUNCTION(BlueprintPure, Category = "LOOPED|Perks")
@@ -450,6 +594,28 @@ public:
 	float GetRunMaxHealth() const { return CurrentRunState.MaxHealth; }
 	bool IsRunHealthInitialized() const { return CurrentRunState.bHealthInitialized; }
 
+	// Q chrono-skill gauge — same travel-persistence idea as health (-1 = seed to max on spawn).
+	float GetRunSkillGauge() const { return CurrentRunState.SkillGauge; }
+	void SetRunSkillGauge(float Seconds) { CurrentRunState.SkillGauge = Seconds; }
+
+	// --- Chrono-skill training (Lysa, the skill merchant): permanent cross-run gauge ranks ---
+	// Bodies in the .cpp (ULoopedSaveData is only forward-declared here).
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Skill")
+	int32 GetSkillGaugeRanks() const;
+
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Skill")
+	float GetSkillGaugeBonusSeconds() const;
+
+	// One rank bought: persists, returns the NEW rank count (0 if save missing / already maxed).
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Skill")
+	int32 GrantSkillGaugeRank();
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Skill")
+	int32 MaxSkillGaugeRanks = 3;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Skill")
+	float SkillGaugePerRankSeconds = 1.0f;
+
 	// --- Rescued-companion relic tokens (once per run; see looped_rescue_system.md) ---
 	// Lysa "Second Wind": the Character consumes this when a lethal hit is survived at 1 HP.
 	bool IsSecondWindUsed() const { return CurrentRunState.bSecondWindUsed; }
@@ -467,6 +633,25 @@ public:
 		CurrentRunState.bCardRerollUsed = true;
 		return true;
 	}
+
+	// --- Mira's fragments (the 4th rescue: no cage, no mission — she is SCATTERED through the
+	// loop). AMiraFragment pickups sit in deep rooms; the hunt is live only while Serin is
+	// rescued, Mira isn't, and no fragment was taken THIS run (one per run — the reset scatters
+	// her again). At MiraFragmentsNeeded she reforms: GrantArtifact("Mira") ends the hunt.
+	// Bodies in the .cpp — ULoopedSaveData is only forward-declared here.
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Artifacts")
+	bool IsMiraFragmentHuntActive() const;
+
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Artifacts")
+	int32 GetMiraFragments() const;
+
+	// One fragment into the pile: latches this run, persists the count, grants "Mira" at the
+	// threshold. Returns the new count (for the pickup's "n of N" line).
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Artifacts")
+	int32 CollectMiraFragment();
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Artifacts")
+	int32 MiraFragmentsNeeded = 5;
 
 	// "Void Vigor" — merchant-bought +max HP for THIS run only (folded into the Character's
 	// ApplyMaxHPMod). Public accessors so callers never touch the private run state directly.
@@ -528,7 +713,55 @@ public:
 
 	// True once the player has cleared enough rooms that the next exit must be the Boss.
 	UFUNCTION(BlueprintPure, Category = "LOOPED|Run")
-	bool IsBossNext() const { return RunRoomsEntered >= RunLengthBeforeBoss; }
+	bool IsBossNext() const { return RunRoomsEntered >= GetFloorRunLength(); }
+
+	// --- FLOORS 2 & 3: the descent (straight down, run state carries; The Looped waits at the
+	// bottom — see project-looped-floors-arc). CurrentFloor is transient like RunRoomsEntered:
+	// survives OpenLevel, reset to 1 by BeginRunPath, so death/hub always restarts the descent. ---
+	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Floors")
+	int32 CurrentFloor = 1;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Floors")
+	int32 MaxFloors = 3;
+
+	// Per-floor tuning knobs (index 0 = floor 1; shorter arrays clamp to their last entry).
+	// Applied to ROW-TYPED enemies in ApplyEnemyType; bosses are exempt (their rows are absolute).
+	UPROPERTY(EditAnywhere, Category = "LOOPED|Floors")
+	TArray<float> FloorHealthMult { 1.0f, 1.6f, 2.4f };
+
+	UPROPERTY(EditAnywhere, Category = "LOOPED|Floors")
+	TArray<float> FloorDamageMult { 1.0f, 1.35f, 1.8f };
+
+	// Rooms before each floor's boss (empty = RunLengthBeforeBoss everywhere). 9/7/5 keeps the
+	// full descent ~21 rooms + 3 bosses; tune freely.
+	UPROPERTY(EditAnywhere, Category = "LOOPED|Floors")
+	TArray<int32> FloorRoomCounts { 9, 7, 5 };
+
+	// DT_Enemies row applied over the spawned boss per floor. Rows carry ABSOLUTE stats
+	// (no floor multiplication) — each row IS that floor's boss tuning. Floor 3 = The Looped.
+	UPROPERTY(EditAnywhere, Category = "LOOPED|Floors")
+	TArray<FName> FloorBossRows { FName(TEXT("FloorBoss1")), FName(TEXT("FloorBoss2")), FName(TEXT("TheLooped")) };
+
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Floors")
+	int32 GetCurrentFloor() const { return CurrentFloor; }
+
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Floors")
+	bool IsFinalFloor() const { return CurrentFloor >= MaxFloors; }
+
+	int32 GetFloorRunLength() const
+	{
+		if (FloorRoomCounts.Num() == 0) return RunLengthBeforeBoss;
+		return FloorRoomCounts[FMath::Clamp(CurrentFloor - 1, 0, FloorRoomCounts.Num() - 1)];
+	}
+
+	float GetFloorHealthMult() const;
+	float GetFloorDamageMult() const;
+	FName GetFloorBossRow() const;
+
+	// Descend one floor: ++CurrentFloor, reset the room counter, and return the new floor's
+	// opening room (drawn from the Combat pool via EnterRoomType, so the fork loop, room
+	// counter and boss gate all pick up naturally). Called by the GameMode on a mid-run boss kill.
+	FName BeginNextFloor();
 
 	// Look up a row in DT_RoomTypes (nullptr if missing / table unset).
 	const struct FRoomTypeData* FindRoomType(FName RoomTypeId) const;
@@ -571,6 +804,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "LOOPED|Artifacts")
 	TArray<FName> GetRunArtifacts() const;
 
+	// Vorr's SELL page: pawn a held run relic. True if it was held (and is now gone) — the
+	// caller pays out. Re-derives movement/HP mods since relic tags stop applying instantly.
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Artifacts")
+	bool RemoveRunArtifact(FName ArtifactId);
+
 	// Artifact definition row by id (nullptr if missing / table unset).
 	const FArtifactData* FindArtifactRow(FName ArtifactId) const;
 
@@ -594,6 +832,7 @@ public:
 	UFUNCTION(BlueprintPure, Category = "LOOPED|Artifacts") float GetArtifactShardMult() const;   // Artifact.ShardGain (product)
 	UFUNCTION(BlueprintPure, Category = "LOOPED|Artifacts") float GetArtifactEchoMult() const;    // Artifact.EchoGain  (product)
 	UFUNCTION(BlueprintPure, Category = "LOOPED|Artifacts") float GetArtifactDamageMult() const;  // Artifact.DamageMult(product)
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Artifacts") float GetArtifactCritChance() const;  // Artifact.CritChance(sum) — Whetstone
 
 	// --- Treasure room "N of X" pick budget (resets per treasure room) ---
 	// Default 1 = take one pedestal, the rest lock. A relic could raise this later.
@@ -606,11 +845,23 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|Treasure")
 	void ResetTreasurePicks();                       // call on entering a treasure room
 
+	// Effective per-room pick budget: MaxAllowedPicks +1 while the "TwinPedestal" blessing is held.
 	UFUNCTION(BlueprintPure, Category = "LOOPED|Treasure")
-	bool CanPickTreasure() const { return CurrentRoomPicks < MaxAllowedPicks; }
+	int32 GetEffectiveMaxPicks() const;
+
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Treasure")
+	bool CanPickTreasure() const { return CurrentRoomPicks < GetEffectiveMaxPicks(); }
 
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|Treasure")
 	void RegisterTreasurePick();                     // increment after a confirmed pick
+
+	// --- Missions & hints (the monitor's State-1 guidance panel; rows live in DT_Missions) ---
+	// Walks the table and computes (current, target, active, complete) per row from state we
+	// already track — a dozen cheap reads, run when the monitor opens. Gated-off rows are
+	// dropped; retired hints (condition complete) are dropped; complete missions sink to the
+	// bottom. Sorted by Priority. The panel shows the FIRST returned Hint as its header line.
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Missions")
+	TArray<FMissionStatus> EvaluateMissions() const;
 
 	// The node the player is currently in (default-constructed if in the Hub / pre-run).
 	UFUNCTION(BlueprintPure, Category = "LOOPED|Run")
@@ -652,6 +903,16 @@ private:
 	UPROPERTY()
 	TObjectPtr<UDataTable> ArtifactTable;
 
+	// Missions & hints table (DT_Missions, rows = FMissionData), loaded by path in Init().
+	// Adding a mission or hint = add a row — no code change.
+	UPROPERTY()
+	TObjectPtr<UDataTable> MissionTable;
+
+	// Current value for one mission condition. Every branch reads state that already exists —
+	// StatAtLeast keys: BossKills / BossDeaths / RoomClears / TotalEnemyKills / RunsCompleted /
+	// TotalDeaths / Echoes / MiraFragments / SkillGaugeRanks / UnlockedCards / Companions.
+	int32 ResolveMissionCounter(EMissionCondition Type, FName Key) const;
+
 	void LoadOrCreateStats();
 	void EvaluateUnlocksAfterStatChange();
 
@@ -659,3 +920,6 @@ private:
 	float SumArtifactMagnitude(FName TagName) const;      // additive families  (0 if none)
 	float ProductArtifactMagnitude(FName TagName) const;  // multiplier families (1 if none)
 };
+
+// Player-facing tier word — "COMMON" / "RARE" / "EPIC" / "CURSED" (card labels + shop lines).
+const TCHAR* GetRarityWord(ECardRarity Rarity);

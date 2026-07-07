@@ -46,6 +46,20 @@ struct FRoomTypeData : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room Type")
 	TArray<FName> LevelPool;
 
+	// FLOOR 1 WARM-UP: the first rooms of a fresh run draw from here when non-empty (gentle
+	// arenas only — "the first 2-3 fight rooms need to be easy", Sahar 2026-07-07). Floors 2/3
+	// are exempt on purpose: down there the loop owes you nothing.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room Type")
+	TArray<FName> LevelPoolFloor1Early;
+
+	// FLOORS 2/3: optional per-floor pools — when non-empty, that floor draws from here instead
+	// of LevelPool (empty = fall back). Lets each floor own its maps without new type rows.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room Type")
+	TArray<FName> LevelPoolFloor2;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room Type")
+	TArray<FName> LevelPoolFloor3;
+
 	// Relative odds this type is offered in a fork. Equal weights = equal chance; raise/lower to make
 	// a type common or rare (e.g. a future "?" Event set low). 0 = effectively never offered.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Room Type")

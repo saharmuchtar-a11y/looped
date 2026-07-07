@@ -41,6 +41,13 @@ void ULoopedGameInstance::Init()
 		UE_LOG(LogLoopedCore, Warning, TEXT("[Artifacts] DT_Artifacts not found at /Game/Data/DT_Artifacts — create + populate it (Content Overhaul Step 2)."));
 	}
 
+	// Missions & hints for the monitor's guidance panel — same load-by-path pattern.
+	MissionTable = LoadObject<UDataTable>(nullptr, TEXT("/Game/Data/DT_Missions.DT_Missions"));
+	if (!MissionTable)
+	{
+		UE_LOG(LogLoopedCore, Warning, TEXT("[Missions] DT_Missions not found at /Game/Data/DT_Missions — the monitor guidance panel stays empty until it's created + populated."));
+	}
+
 	UE_LOG(LogLoopedCore, Display, TEXT("LoopedGameInstance initialized. Hunter Rank: %d"), HunterRank);
 #if !UE_BUILD_SHIPPING
 	// [GameInstance] INIT on-screen message removed for a clean screen (UE_LOG above kept for dev).
@@ -67,6 +74,27 @@ void ULoopedGameInstance::LoadOrCreateStats()
 		UE_LOG(LogLoopedCore, Display, TEXT("[Stats] Created fresh save (no existing save or load failed)."));
 		SaveStats();
 	}
+
+	// --- Legacy-save migration (tutorial arc): the Arm Monitor became Orin's gift. Any save
+	// with real progress predates the tutorial — grant Orin silently so the monitor keeps
+	// working and the Hub (which now routes Orin-less saves to L_Tutorial) never bounces them.
+	if (!Stats->OwnedArtifacts.Contains(TEXT("Orin")) &&
+		(Stats->RunsCompleted > 0 || Stats->BossKills > 0 || Stats->RoomClears > 0 ||
+		 Stats->Echoes > 0 || Stats->UnlockedCards.Num() > 0 || Stats->OwnedArtifacts.Num() > 0))
+	{
+		Stats->OwnedArtifacts.Add(TEXT("Orin"));
+		SaveStats();
+		UE_LOG(LogLoopedCore, Display, TEXT("[Stats] Legacy save migrated — Orin (Arm Monitor) granted."));
+	}
+
+	// Consistency repair: Mira owned but fragments short (a cheat-grant predating the
+	// grant-time top-up) — reform her whole so the fragment mission/hint retire.
+	if (Stats->OwnedArtifacts.Contains(TEXT("Mira")) && Stats->MiraFragments < MiraFragmentsNeeded)
+	{
+		Stats->MiraFragments = MiraFragmentsNeeded;
+		SaveStats();
+		UE_LOG(LogLoopedCore, Display, TEXT("[Stats] Save repaired — Mira owned, fragments topped to %d."), MiraFragmentsNeeded);
+	}
 	UE_LOG(LogLoopedCore, Display, TEXT("[Stats] Loaded: BossDeaths=%d BossKills=%d Runs=%d Playtime=%.0fs Unlocks=%d"),
 		Stats->BossDeaths, Stats->BossKills, Stats->RunsCompleted, Stats->TotalPlaytimeSeconds, Stats->UnlockedCards.Num());
 }
@@ -82,6 +110,7 @@ void ULoopedGameInstance::AddBossDeath()
 	if (!Stats) return;
 	Stats->BossDeaths++;
 	Stats->TotalDeaths++;
+	ApplyChronometerOnDeath();
 	EvaluateUnlocksAfterStatChange();
 	SaveStats();
 }
@@ -102,7 +131,24 @@ void ULoopedGameInstance::AddPlayerDeath()
 {
 	if (!Stats) return;
 	Stats->TotalDeaths++;
+	ApplyChronometerOnDeath();
+	EvaluateUnlocksAfterStatChange(); // Chronometer itself unlocks at 10 deaths
 	SaveStats();
+}
+
+void ULoopedGameInstance::ApplyChronometerOnDeath()
+{
+	// Relic "Chronometer": death converts a cut of your run Shards into permanent Echoes —
+	// the loop pities the persistent. Consumes the Shards so the conversion can't double-dip.
+	if (!HasArtifact(TEXT("Chronometer")) || CurrentRunState.Shards <= 0) return;
+	const int32 Converted = FMath::FloorToInt(CurrentRunState.Shards * ChronometerConvertFraction);
+	if (Converted > 0)
+	{
+		AddEchoes(Converted);
+		UE_LOG(LogLoopedCore, Display, TEXT("[Relic] Chronometer converted %d Shards -> %d Echoes on death."),
+			CurrentRunState.Shards, Converted);
+	}
+	CurrentRunState.Shards = 0;
 }
 
 void ULoopedGameInstance::AddRoomClear()
@@ -111,6 +157,43 @@ void ULoopedGameInstance::AddRoomClear()
 	Stats->RoomClears++;
 	EvaluateUnlocksAfterStatChange();
 	SaveStats();
+}
+
+void ULoopedGameInstance::AddEnemyKill()
+{
+	if (!Stats) return;
+	Stats->TotalEnemyKills++;
+	EvaluateUnlocksAfterStatChange(); // cheap set-checks; Echo pops mid-fight at 150
+
+	// --- Single on-kill hook: kill-triggered blessings + cards fire here (once per enemy death) ---
+	// Blessing "LootersEye": flat Shards per kill (distinct from Greedring's multiplier).
+	if (HasRunArtifact(TEXT("LootersEye")))
+	{
+		AddShards(LootersEyeShardsPerKill);
+	}
+
+	ALoopedCharacter* Player = nullptr;
+	if (UWorld* World = GetWorld())
+	{
+		Player = Cast<ALoopedCharacter>(UGameplayStatics::GetPlayerCharacter(World, 0));
+	}
+	if (!Player) return;
+
+	// Blessing "LeechFang": a sliver of life per kill.
+	if (HasRunArtifact(TEXT("LeechFang")))
+	{
+		Player->HealPlayer(LeechFangHealPerKill);
+	}
+	// Card "Reaper": kills feed you (bigger heal than Lifesteal's per-hit trickle, rarer trigger).
+	if (const FPassiveCardLevel* ReaperLv = GetEffectiveLevelData(TEXT("Reaper")))
+	{
+		if (ReaperLv->HealAmount > 0.0f) Player->HealPlayer(ReaperLv->HealAmount);
+	}
+	// Card "Momentum": kills grant a brief stacking speed burst (the Character owns the timer).
+	if (const FPassiveCardLevel* MomLv = GetEffectiveLevelData(TEXT("Momentum")))
+	{
+		if (MomLv->Fraction > 0.0f) Player->TriggerMomentumBurst(MomLv->Fraction);
+	}
 }
 
 void ULoopedGameInstance::AddRunCompleted()
@@ -209,6 +292,13 @@ void ULoopedGameInstance::GrantArtifact(FName ArtifactName)
 	if (!Stats || ArtifactName.IsNone()) return;
 	if (Stats->OwnedArtifacts.Contains(ArtifactName)) return;
 	Stats->OwnedArtifacts.Add(ArtifactName);
+	// Mira reforms WHOLE: however she arrives (5th fragment or a cheat/dev grant), the fragment
+	// counter reads complete — else the fragment mission + hint sit stuck at N/5 forever.
+	if (ArtifactName == TEXT("Mira") && Stats->MiraFragments < MiraFragmentsNeeded)
+	{
+		Stats->MiraFragments = MiraFragmentsNeeded;
+	}
+	EvaluateUnlocksAfterStatChange(); // companions gate cards (Lysa -> Frostbite) — fire NOW
 	SaveStats();
 	UE_LOG(LogLoopedCore, Display, TEXT("[Artifact] Granted: %s (owned: %d)"), *ArtifactName.ToString(), Stats->OwnedArtifacts.Num());
 #if !UE_BUILD_SHIPPING
@@ -243,23 +333,49 @@ FText ULoopedGameInstance::GetOwnedArtifactsLabel() const
 {
 	if (!Stats || Stats->OwnedArtifacts.Num() == 0) return FText::GetEmpty();
 	FString Out;
-	bool bFirst = true;
+	int32 Listed = 0;
+	const int32 MaxListed = 8; // the corner is a glance — long collections collapse (Sahar 2026-07-07)
+	int32 Skipped = 0;
 	for (const FName& A : Stats->OwnedArtifacts)
 	{
-		if (!bFirst) Out += TEXT("\n");
-		// "Name — what it does" so the monitor explains every owned relic at a glance.
+		// Companions aren't relics — they stand in the Hub in person (Sahar 2026-07-07).
+		static const FName Companions[] = {
+			FName("Orin"), FName("Lysa"), FName("Brann"), FName("Serin"), FName("Mira") };
+		bool bCompanion = false;
+		for (const FName& C : Companions) { if (A == C) { bCompanion = true; break; } }
+		if (bCompanion) { ++Skipped; continue; }
+
+		if (Listed >= MaxListed) break;
+		if (Listed > 0) Out += TEXT("\n");
+		// NAMES ONLY — full descriptions overflowed the monitor corner (Sahar 2026-07-03); the
+		// First Hunter's codex RELICS page carries the complete "what it does" text.
 		const FArtifactData* Row = FindArtifactRow(A);
-		if (Row && !Row->Description.IsEmpty())
-		{
-			Out += FString::Printf(TEXT("%s — %s"), *Row->DisplayName.ToString(), *Row->Description.ToString());
-		}
-		else
-		{
-			Out += A.ToString();
-		}
-		bFirst = false;
+		Out += (Row && !Row->DisplayName.IsEmpty()) ? Row->DisplayName.ToString() : A.ToString();
+		++Listed;
+	}
+	const int32 Overflow = Stats->OwnedArtifacts.Num() - Skipped - Listed;
+	if (Overflow > 0)
+	{
+		Out += FString::Printf(TEXT("\n+%d more"), Overflow);
 	}
 	return FText::FromString(Out);
+}
+
+TArray<FName> ULoopedGameInstance::GetOwnedArtifactNames() const
+{
+	return Stats ? Stats->OwnedArtifacts.Array() : TArray<FName>();
+}
+
+bool ULoopedGameInstance::SellPermanentArtifact(FName ArtifactName)
+{
+	if (!Stats || ArtifactName.IsNone()) return false;
+	if (Stats->OwnedArtifacts.Remove(ArtifactName) == 0) return false;
+	// Blacklist so milestone auto-grants (EvaluateUnlocksAfterStatChange / the Iron Will gate)
+	// can't hand the sold relic straight back — the sale must MEAN something.
+	Stats->SoldRelics.AddUnique(ArtifactName);
+	SaveStats();
+	UE_LOG(LogLoopedCore, Display, TEXT("[Artifact] SOLD to Vorr: %s"), *ArtifactName.ToString());
+	return true;
 }
 
 FText ULoopedGameInstance::GetCurseDescription(FName Curse) const
@@ -278,7 +394,46 @@ FText ULoopedGameInstance::GetCurseDescription(FName Curse) const
 	if (Curse == TEXT("Weakness"))  return FText::FromString(TEXT("you deal 25% less damage"));
 	if (Curse == TEXT("Volatile"))  return FText::FromString(TEXT("dying enemies detonate against you too"));
 	if (Curse == TEXT("Static"))    return FText::FromString(TEXT("your cards only fire every other hit"));
+	if (Curse == TEXT("Toll"))          return FText::FromString(TEXT("every door demands payment"));
+	if (Curse == TEXT("DullBlade"))     return FText::FromString(TEXT("your strikes cannot crit"));
+	if (Curse == TEXT("ShatteredSight"))return FText::FromString(TEXT("enemy health is hidden from you"));
+	if (Curse == TEXT("Bounty"))        return FText::FromString(TEXT("every kill alerts the whole room"));
+	if (Curse == TEXT("Cowardice"))     return FText::FromString(TEXT("enemies frenzy at half health"));
+	if (Curse == TEXT("Feverdream"))    return FText::FromString(TEXT("enemy attacks come faster"));
+	if (Curse == TEXT("Extortion"))     return FText::FromString(TEXT("Vorr's prices climb steeply"));
+	if (Curse == TEXT("Amnesia"))       return FText::FromString(TEXT("the cards refuse to explain themselves"));
+	if (Curse == TEXT("Swarm"))         return FText::FromString(TEXT("the loop sends one more"));
+	if (Curse == TEXT("Haunted"))       return FText::FromString(TEXT("one foe per room refuses to stay dead"));
+	if (Curse == TEXT("Fogbound"))      return FText::FromString(TEXT("the portals hide where they lead"));
 	return FText::GetEmpty();
+}
+
+float ULoopedGameInstance::GetCurseSeverityMult() const
+{
+	return HasArtifact(TEXT("IronWill")) ? IronWillSeverityMult : 1.0f;
+}
+
+void ULoopedGameInstance::ApplyRoomEntryToll()
+{
+	if (!HasCurse(TEXT("Toll"))) return;
+
+	if (SpendShards(CurseTollShards))
+	{
+		UE_LOG(LogLoopedCore, Display, TEXT("[Curse] Toll paid: %d Shards."), CurseTollShards);
+		return;
+	}
+	// Can't afford the toll — it takes flesh instead (Iron Will softens it).
+	ResetShards();
+	if (UWorld* World = GetWorld())
+	{
+		if (ALoopedCharacter* Player = Cast<ALoopedCharacter>(UGameplayStatics::GetPlayerCharacter(World, 0)))
+		{
+			const float HPCost = CurseTollHPFallback * GetCurseSeverityMult();
+			Player->TakeDamageFromEnemy(HPCost);
+			Player->ShowCenterMessage(FText::FromString(TEXT("the Toll takes flesh instead")), 2.0f);
+			UE_LOG(LogLoopedCore, Display, TEXT("[Curse] Toll unaffordable — took %.0f HP."), HPCost);
+		}
+	}
 }
 
 void ULoopedGameInstance::RecordEnemySeen(FName EnemyTypeRow)
@@ -379,6 +534,52 @@ TArray<FName> ULoopedGameInstance::GetPendingNextRunCards() const
 	return Stats ? Stats->PendingNextRunCards : TArray<FName>();
 }
 
+void ULoopedGameInstance::QueueNextRunCurse(FName Curse)
+{
+	if (!Stats || Curse.IsNone()) return;
+	Stats->PendingNextRunCurse = Curse;
+	SaveStats();
+	UE_LOG(LogLoopedCore, Display, TEXT("[Ransom] Curse '%s' queued for the next run."), *Curse.ToString());
+}
+
+FName ULoopedGameInstance::TakePendingNextRunCurse()
+{
+	if (!Stats || Stats->PendingNextRunCurse.IsNone()) return NAME_None;
+	const FName Owed = Stats->PendingNextRunCurse;
+	Stats->PendingNextRunCurse = NAME_None;
+	SaveStats();
+	return Owed;
+}
+
+bool ULoopedGameInstance::IsMiraFragmentHuntActive() const
+{
+	return Stats
+		&& Stats->OwnedArtifacts.Contains(TEXT("Serin"))
+		&& !Stats->OwnedArtifacts.Contains(TEXT("Mira"))
+		&& Stats->MiraFragments < MiraFragmentsNeeded
+		&& !CurrentRunState.bMiraFragmentTaken;
+}
+
+int32 ULoopedGameInstance::GetMiraFragments() const
+{
+	return Stats ? Stats->MiraFragments : 0;
+}
+
+int32 ULoopedGameInstance::CollectMiraFragment()
+{
+	if (!Stats) return 0;
+	CurrentRunState.bMiraFragmentTaken = true; // one per run — the reset scatters her again
+	Stats->MiraFragments = FMath::Min(Stats->MiraFragments + 1, MiraFragmentsNeeded);
+	SaveStats();
+	UE_LOG(LogLoopedCore, Display, TEXT("[Rescue] Mira fragment %d/%d collected."),
+		Stats->MiraFragments, MiraFragmentsNeeded);
+	if (Stats->MiraFragments >= MiraFragmentsNeeded)
+	{
+		GrantArtifact(TEXT("Mira")); // she reforms — hub NPC + the reroll relic go live
+	}
+	return Stats->MiraFragments;
+}
+
 void ULoopedGameInstance::ClearPendingNextRunCards()
 {
 	if (Stats && Stats->PendingNextRunCards.Num() > 0)
@@ -386,6 +587,34 @@ void ULoopedGameInstance::ClearPendingNextRunCards()
 		Stats->PendingNextRunCards.Empty();
 		SaveStats();
 	}
+}
+
+bool ULoopedGameInstance::RemovePendingNextRunCard(FName Card)
+{
+	if (!Stats || Stats->PendingNextRunCards.Remove(Card) == 0) return false;
+	SaveStats();
+	UE_LOG(LogLoopedCore, Display, TEXT("[Merchant] Queued boon '%s' bought back."), *Card.ToString());
+	return true;
+}
+
+int32 ULoopedGameInstance::GetSkillGaugeRanks() const
+{
+	return Stats ? Stats->SkillGaugeRanks : 0;
+}
+
+float ULoopedGameInstance::GetSkillGaugeBonusSeconds() const
+{
+	return GetSkillGaugeRanks() * SkillGaugePerRankSeconds;
+}
+
+int32 ULoopedGameInstance::GrantSkillGaugeRank()
+{
+	if (!Stats || Stats->SkillGaugeRanks >= MaxSkillGaugeRanks) return 0;
+	Stats->SkillGaugeRanks++;
+	SaveStats();
+	UE_LOG(LogLoopedCore, Display, TEXT("[Skill] Chrono-gauge rank %d/%d bought (+%.1fs each)."),
+		Stats->SkillGaugeRanks, MaxSkillGaugeRanks, SkillGaugePerRankSeconds);
+	return Stats->SkillGaugeRanks;
 }
 
 void ULoopedGameInstance::AddShards(int32 Amount)
@@ -407,6 +636,12 @@ bool ULoopedGameInstance::SpendShards(int32 Amount)
 {
 	if (Amount <= 0 || CurrentRunState.Shards < Amount) return false;
 	CurrentRunState.Shards -= Amount;
+	// Lifetime spend tracker — gates the "VorrsMarker" relic. Saved lazily with other events.
+	if (Stats)
+	{
+		Stats->TotalShardsSpent += Amount;
+		EvaluateUnlocksAfterStatChange();
+	}
 	return true;
 }
 
@@ -476,8 +711,31 @@ void ULoopedGameInstance::WipeSaveCheat()
 void ULoopedGameInstance::AddCurse(FName Curse)
 {
 	if (Curse.IsNone() || CurrentRunState.ActiveCurses.Contains(Curse)) return;
+
+	// Blessing "Hexward": the first curse of the run shatters against the ward instead of landing.
+	if (!CurrentRunState.bHexwardUsed && HasRunArtifact(TEXT("Hexward")))
+	{
+		CurrentRunState.bHexwardUsed = true;
+		UE_LOG(LogLoopedCore, Display, TEXT("[Curse] Hexward deflected '%s'."), *Curse.ToString());
+		if (UWorld* World = GetWorld())
+		{
+			if (ALoopedCharacter* Player = Cast<ALoopedCharacter>(UGameplayStatics::GetPlayerCharacter(World, 0)))
+			{
+				Player->ShowCenterMessage(FText::FromString(TEXT("the Hexward shatters — the curse never lands")), 2.5f);
+			}
+		}
+		return;
+	}
+
 	CurrentRunState.ActiveCurses.Add(Curse);
 	UE_LOG(LogLoopedCore, Display, TEXT("[Curse] +%s (active: %d)"), *Curse.ToString(), CurrentRunState.ActiveCurses.Num());
+
+	// Relic gate "IronWill": earned the hard way — by carrying three curses at once.
+	if (Stats && !Stats->OwnedArtifacts.Contains(TEXT("IronWill")) &&
+		!Stats->SoldRelics.Contains(TEXT("IronWill")) && CurrentRunState.ActiveCurses.Num() >= 3)
+	{
+		GrantArtifact(TEXT("IronWill"));
+	}
 
 	// Discovery: suffering a curse unlocks its codex entry.
 	if (Stats && !Stats->SeenCurses.Contains(Curse))
@@ -537,7 +795,12 @@ int32 ULoopedGameInstance::RollEventCategory()
 {
 	// Rolling pity odds: fight/treasure shares grow per "?" that doesn't produce them, reset on hit.
 	const float FightShare    = FMath::Min(0.5f, EventFightBaseShare + EventFightPityStep * EventRoomsSinceFight);
-	const float TreasureShare = FMath::Min(0.4f, EventTreasureBaseShare + EventTreasurePityStep * EventRoomsSinceTreasure);
+	float TreasureShare = FMath::Min(0.4f, EventTreasureBaseShare + EventTreasurePityStep * EventRoomsSinceTreasure);
+	// Blessing "VoidLens": the lens finds the loot — "?" rooms lean hard toward treasure.
+	if (HasRunArtifact(TEXT("VoidLens")))
+	{
+		TreasureShare = FMath::Max(TreasureShare, VoidLensTreasureShare);
+	}
 	const float Roll = FMath::FRand();
 
 	int32 Category = 0; // story event
@@ -671,15 +934,38 @@ void ULoopedGameInstance::EvaluateUnlocksAfterStatChange()
 		if (bCondition) { UnlockCard(FName(Card)); }
 	};
 
-	// Rare cards
+	// Gated cards
 	TryUnlock(TEXT("MaxHP"),      Stats->BossDeaths >= 1);   // first boss death (earliest — safety net)
 	TryUnlock(TEXT("Lifesteal"),  Stats->RoomClears >= 10);  // ~a couple full runs in
-	TryUnlock(TEXT("ChainSpark"), Stats->BossKills  >= 5);   // 5 boss kills
+	TryUnlock(TEXT("Frostbite"),  Stats->OwnedArtifacts.Contains(TEXT("Lysa"))); // Lysa's rescue gift
+	TryUnlock(TEXT("Echo"),       Stats->TotalEnemyKills >= 150);                // a hunter's rhythm
+	// (ChainSpark retired 2026-07-03 — Echo owns the "hits do more" slot. The BossKills>=5
+	// milestone is free for a future unlock; ApplyChainSparkEffect stays: Capacitor reuses it.)
 
 	// Epic cards.
 	// Speed is unlocked ONLY by a fast run (see AddRunCompleted / FastRunUnlockSeconds) — Sahar's call.
 	// Gravity is NOT unlocked here — it's gated behind completing the Hub parkour
 	// (ACardUnlockTrigger at the summit calls UnlockCard("Gravity")).
+
+	// --- Wave-2 permanent relic gates ---
+	// GrantArtifact is idempotent, shows its own "RELIC ACQUIRED" toast, and re-enters this
+	// function after adding to the owned set — so nested grants terminate safely.
+	auto TryGrantRelic = [this](const TCHAR* Relic, bool bCondition)
+	{
+		// Sold-to-Vorr relics stay sold — the milestone can't hand them straight back.
+		if (bCondition && !Stats->OwnedArtifacts.Contains(Relic) && !Stats->SoldRelics.Contains(Relic))
+		{
+			GrantArtifact(FName(Relic));
+		}
+	};
+	TryGrantRelic(TEXT("ScarLedger"),     Stats->TotalDamageDealt >= ScarLedgerDamageStep);
+	TryGrantRelic(TEXT("TrophyFang"),     Stats->RoomClears >= 50);
+	TryGrantRelic(TEXT("Chronometer"),    Stats->TotalDeaths >= 10);
+	TryGrantRelic(TEXT("Crown"),          Stats->BossKills >= 3);
+	TryGrantRelic(TEXT("FirstFrequency"), GetMaxedPerkCount() >= 3);
+	TryGrantRelic(TEXT("VoidCompass"),    Stats->PerksEverMaxed.Contains(TEXT("Gravity")));
+	TryGrantRelic(TEXT("VorrsMarker"),    Stats->TotalShardsSpent >= 100);
+	// (IronWill is granted in AddCurse — 3 curses at once; BrokersSeal is a vault purchase.)
 
 	// Permanent merchant vault opens on the first boss kill — a milestone reward that
 	// keeps players invested (Vorr only deals seriously with proven Hunters).
@@ -804,21 +1090,55 @@ TArray<FName> ULoopedGameInstance::GetEligibleCards(const TArray<FName>& /*InAll
 
 TArray<FName> ULoopedGameInstance::GetCardOffer(const TArray<FName>& InPool) const
 {
-	TArray<FName> Eligible = GetEligibleCards(InPool);
-
-	// Fisher–Yates shuffle so the N we take are distinct and randomized.
-	for (int32 i = Eligible.Num() - 1; i > 0; --i)
-	{
-		const int32 j = FMath::RandRange(0, i);
-		Eligible.Swap(i, j);
-	}
-
-	const int32 N = FMath::Min(GetCardChoiceCount(), Eligible.Num());
+	const TArray<FName> Eligible = GetEligibleCards(InPool);
+	const int32 N = GetCardChoiceCount();
 	TArray<FName> Out;
 	Out.Reserve(N);
-	for (int32 i = 0; i < N; ++i)
+	if (Eligible.Num() == 0) return Out;
+
+	auto WeightOf = [this](const FName& Card) -> int32
 	{
-		Out.Add(Eligible[i]);
+		switch (GetPerkRarity(Card))
+		{
+			case ECardRarity::Common: return OfferWeightCommon;
+			case ECardRarity::Rare:   return OfferWeightRare;
+			case ECardRarity::Epic:   return OfferWeightEpic;
+			default:                  return 0; // Cursed never rolls into a reward
+		}
+	};
+
+	// Rarity-weighted draw WITHOUT replacement: each pick removes the card from the bag, so
+	// the offer stays distinct while the pool allows it.
+	TArray<FName> Bag = Eligible;
+	while (Out.Num() < N && Bag.Num() > 0)
+	{
+		int32 Total = 0;
+		for (const FName& C : Bag) Total += WeightOf(C);
+		if (Total <= 0) break; // only zero-weight cards left
+
+		int32 Roll = FMath::RandRange(1, Total);
+		for (int32 i = 0; i < Bag.Num(); ++i)
+		{
+			Roll -= WeightOf(Bag[i]);
+			if (Roll <= 0)
+			{
+				Out.Add(Bag[i]);
+				Bag.RemoveAt(i);
+				break;
+			}
+		}
+	}
+
+	// Fill every slot the widget can READ (4) — indices past N are never displayed
+	// (ConfigureExtra hides those rows), but the BP reads offer[3] unconditionally and a
+	// 3-entry array throws "index 3 of length 3" runtime errors. Repeats also beat "None"
+	// cards on screen when the eligible pool runs small.
+	// NOTE: copy the repeat BY VALUE before Add — Out.Add(Out[i]) crashes when Add reallocs
+	// the buffer out from under the element reference (2026-07-03 mid-fight editor crash).
+	for (int32 i = 0; Out.Num() > 0 && Out.Num() < FMath::Max(N, 4); ++i)
+	{
+		const FName Repeat = Out[i % Out.Num()];
+		Out.Add(Repeat);
 	}
 	return Out;
 }
@@ -832,16 +1152,22 @@ FText ULoopedGameInstance::GetPerkCardLabel(FName PerkName) const
 	const int32 Cap = Row->MaxLevel;
 	const FString Name = Row->DisplayName.IsEmpty() ? PerkName.ToString() : Row->DisplayName.ToString();
 
-	// Two-row label (no dash): row 1 = NAME [NEW/MAX], row 2 = (Lv x/n).
+	// Two-row label (no dash): row 1 = NAME [NEW/MAX], row 2 = (Lv x/n) — RARITY.
 	FString Top, Bottom;
 	if (Current <= 0)        { Top = FString::Printf(TEXT("%s NEW"), *Name); Bottom = FString::Printf(TEXT("(Lv 1/%d)"), Cap); }
 	else if (Current >= Cap) { Top = FString::Printf(TEXT("%s MAX"), *Name); Bottom = FString::Printf(TEXT("(Lv %d/%d)"), Cap, Cap); }
 	else                     { Top = Name;                                   Bottom = FString::Printf(TEXT("(Lv %d/%d)"), Current + 1, Cap); }
+	Bottom += FString::Printf(TEXT(" — %s"), GetRarityWord(Row->Rarity));
 	return FText::FromString(Top + TEXT("\n") + Bottom);
 }
 
 FText ULoopedGameInstance::GetCardDraftDescription(FName CardId) const
 {
+	// Curse "Amnesia": the monitor can't decode the frequencies — draft blind.
+	if (HasCurse(TEXT("Amnesia")))
+	{
+		return FText::FromString(TEXT("...the frequency resists analysis..."));
+	}
 	const FPassiveCardData* Row = FindCardRow(CardId);
 	return Row ? Row->Description : FText::GetEmpty();
 }
@@ -857,6 +1183,46 @@ ECardRarity ULoopedGameInstance::GetPerkRarity(FName PerkName) const
 {
 	const FPassiveCardData* Row = FindCardRow(PerkName);
 	return Row ? Row->Rarity : ECardRarity::Common;
+}
+
+// Player-facing tier word (shared by the card label + shop lines).
+const TCHAR* GetRarityWord(ECardRarity Rarity)
+{
+	switch (Rarity)
+	{
+		case ECardRarity::Rare:   return TEXT("RARE");
+		case ECardRarity::Epic:   return TEXT("EPIC");
+		case ECardRarity::Cursed: return TEXT("CURSED");
+		default:                  return TEXT("COMMON");
+	}
+}
+
+FLinearColor ULoopedGameInstance::GetRarityColor(ECardRarity Rarity)
+{
+	switch (Rarity)
+	{
+		case ECardRarity::Rare:   return FLinearColor(0.30f, 0.65f, 1.00f); // azure
+		case ECardRarity::Epic:   return FLinearColor(0.80f, 0.40f, 1.00f); // violet
+		case ECardRarity::Cursed: return FLinearColor(1.00f, 0.25f, 0.25f); // blood
+		default:                  return FLinearColor(0.78f, 0.80f, 0.82f); // Common silver
+	}
+}
+
+TArray<FName> ULoopedGameInstance::GetAllCardIds() const
+{
+	return CardTable ? CardTable->GetRowNames() : TArray<FName>();
+}
+
+bool ULoopedGameInstance::IsCardGated(FName CardId) const
+{
+	const FPassiveCardData* Row = FindCardRow(CardId);
+	return Row && Row->bRequiresUnlock;
+}
+
+FText ULoopedGameInstance::GetCardDisplayName(FName CardId) const
+{
+	const FPassiveCardData* Row = FindCardRow(CardId);
+	return (Row && !Row->DisplayName.IsEmpty()) ? Row->DisplayName : FText::FromName(CardId);
 }
 
 FLinearColor ULoopedGameInstance::GetPerkColor(FName PerkName) const
@@ -1038,6 +1404,7 @@ FName ULoopedGameInstance::BeginRunPath()
 	CurrentRunPath.Reset();
 	CurrentPathIndex = -1;
 	RunRoomsEntered = 0;
+	CurrentFloor = 1; // every run starts the descent from the top
 
 	// Stamp the run-start wall clock so AddRunCompleted can time the whole run (survives OpenLevel).
 	RunStartRealTime = FPlatformTime::Seconds();
@@ -1050,6 +1417,18 @@ FName ULoopedGameInstance::BeginRunPath()
 	if (Stats && Stats->bPermanentStartingBlessing)
 	{
 		GrantRandomRunArtifact();                    // Keepsake
+	}
+	// Relic "FirstFrequency": the monitor boots with one frequency already decoded — a random
+	// eligible card at level 1, free, every run.
+	if (HasArtifact(TEXT("FirstFrequency")))
+	{
+		TArray<FName> Eligible = GetEligibleCards(TArray<FName>());
+		if (Eligible.Num() > 0)
+		{
+			const FName Freebie = Eligible[FMath::RandRange(0, Eligible.Num() - 1)];
+			AddOrLevelCard(Freebie);
+			UE_LOG(LogLoopedCore, Display, TEXT("[Relic] First Frequency granted '%s' at run start."), *Freebie.ToString());
+		}
 	}
 
 	// Fixed opener: if the routing config's first slot pins a level (Pool=None + FixedLevel), the
@@ -1172,6 +1551,23 @@ TArray<FName> ULoopedGameInstance::GenerateForkChoices(int32 Count)
 		Weights.Add(Row->Weight);
 	}
 
+	// Relic "VorrsMarker": once per run, from room 5 on, one fork choice is FORCED to Merchant
+	// (if offerable and not already drawn) — the Broker always finds his best customers.
+	const FName MerchantType(TEXT("Merchant"));
+	const bool bForceMerchant = HasArtifact(TEXT("VorrsMarker"))
+		&& !CurrentRunState.bMarkerMerchantOffered
+		&& RunRoomsEntered >= 4
+		&& Pool.Contains(MerchantType);
+	if (bForceMerchant)
+	{
+		Result.Add(MerchantType);
+		const int32 MIdx = Pool.IndexOfByKey(MerchantType);
+		Pool.RemoveAt(MIdx);
+		Weights.RemoveAt(MIdx);
+		CurrentRunState.bMarkerMerchantOffered = true;
+		UE_LOG(LogLoopedCore, Display, TEXT("[Relic] Vorr's Marker forced a Merchant fork."));
+	}
+
 	// Weighted draw WITHOUT replacement — guarantees the one hard rule: never two of the same type.
 	while (Result.Num() < Count && Pool.Num() > 0)
 	{
@@ -1194,20 +1590,36 @@ TArray<FName> ULoopedGameInstance::GenerateForkChoices(int32 Count)
 FName ULoopedGameInstance::EnterRoomType(FName RoomTypeId)
 {
 	const FRoomTypeData* Row = FindRoomType(RoomTypeId);
-	if (!Row || Row->LevelPool.Num() == 0)
+	if (!Row)
 	{
-		UE_LOG(LogLoopedCore, Warning, TEXT("[Routing] EnterRoomType '%s' — missing row / empty pool. Returning Hub."), *RoomTypeId.ToString());
+		UE_LOG(LogLoopedCore, Warning, TEXT("[Routing] EnterRoomType '%s' — missing row. Returning Hub."), *RoomTypeId.ToString());
 		return FName(TEXT("L_Hub"));
 	}
 
-	// Pick a level from the type's pool, avoiding an immediate repeat of the current level.
+	// FLOORS 2/3 draw from their own pools when authored; empty = fall back to the base pool.
+	// Floor 1's first rooms use the gentle warm-up pool — a fresh run never opens with an arena.
+	const TArray<FName>* Pool = &Row->LevelPool;
+	if (CurrentFloor == 1 && RunRoomsEntered <= 2 && Row->LevelPoolFloor1Early.Num() > 0)
+	{
+		Pool = &Row->LevelPoolFloor1Early;
+	}
+	else if (CurrentFloor == 2 && Row->LevelPoolFloor2.Num() > 0)      Pool = &Row->LevelPoolFloor2;
+	else if (CurrentFloor >= 3 && Row->LevelPoolFloor3.Num() > 0)      Pool = &Row->LevelPoolFloor3;
+
+	if (Pool->Num() == 0)
+	{
+		UE_LOG(LogLoopedCore, Warning, TEXT("[Routing] EnterRoomType '%s' — empty pool. Returning Hub."), *RoomTypeId.ToString());
+		return FName(TEXT("L_Hub"));
+	}
+
+	// Pick a level from the pool, avoiding an immediate repeat of the current level.
 	const FName Prev = CurrentRunPath.IsValidIndex(CurrentPathIndex) ? CurrentRunPath[CurrentPathIndex].LevelName : NAME_None;
-	FName Level = Row->LevelPool[0];
-	if (Row->LevelPool.Num() > 1)
+	FName Level = (*Pool)[0];
+	if (Pool->Num() > 1)
 	{
 		for (int32 Attempt = 0; Attempt < 8; ++Attempt)
 		{
-			Level = Row->LevelPool[FMath::RandRange(0, Row->LevelPool.Num() - 1)];
+			Level = (*Pool)[FMath::RandRange(0, Pool->Num() - 1)];
 			if (Level != Prev) break;
 		}
 	}
@@ -1229,6 +1641,33 @@ void ULoopedGameInstance::EndRunPath()
 {
 	CurrentPathIndex = -1;
 	UE_LOG(LogLoopedCore, Display, TEXT("[Routing] EndRunPath — path index cleared (heading to Hub)."));
+}
+
+// Shared clamp for the per-floor knob arrays: index 0 = floor 1, short arrays hold their last value.
+static float FloorKnob(const TArray<float>& Arr, int32 Floor)
+{
+	if (Arr.Num() == 0) return 1.0f;
+	return Arr[FMath::Clamp(Floor - 1, 0, Arr.Num() - 1)];
+}
+
+float ULoopedGameInstance::GetFloorHealthMult() const { return FloorKnob(FloorHealthMult, CurrentFloor); }
+float ULoopedGameInstance::GetFloorDamageMult() const { return FloorKnob(FloorDamageMult, CurrentFloor); }
+
+FName ULoopedGameInstance::GetFloorBossRow() const
+{
+	if (FloorBossRows.Num() == 0) return NAME_None;
+	return FloorBossRows[FMath::Clamp(CurrentFloor - 1, 0, FloorBossRows.Num() - 1)];
+}
+
+FName ULoopedGameInstance::BeginNextFloor()
+{
+	CurrentFloor = FMath::Clamp(CurrentFloor + 1, 1, MaxFloors);
+	RunRoomsEntered = 0; // the new floor's boss gate re-arms; forks continue as normal
+	UE_LOG(LogLoopedCore, Display, TEXT("[Floors] Descending — floor %d begins (%d rooms to its boss)."),
+		CurrentFloor, GetFloorRunLength());
+	// Land in a fight: draw the floor's opener from the Combat pool. EnterRoomType appends the
+	// node and bumps the room counter, so HUD/forks/boss-gate all pick up without special cases.
+	return EnterRoomType(FName(TEXT("Combat")));
 }
 
 const FArtifactData* ULoopedGameInstance::FindArtifactRow(FName ArtifactId) const
@@ -1355,6 +1794,24 @@ TArray<FName> ULoopedGameInstance::GetRunArtifacts() const
 	return CurrentRunState.AcquiredArtifacts;
 }
 
+bool ULoopedGameInstance::RemoveRunArtifact(FName ArtifactId)
+{
+	if (CurrentRunState.AcquiredArtifacts.Remove(ArtifactId) == 0) return false;
+
+	UE_LOG(LogLoopedCore, Display, TEXT("[Artifact] Run relic '%s' pawned/removed."), *ArtifactId.ToString());
+	// Its tags stop contributing NOW — re-derive movement/HP and repaint the HUD list.
+	if (UWorld* World = GetWorld())
+	{
+		if (ALoopedCharacter* Player = Cast<ALoopedCharacter>(UGameplayStatics::GetPlayerCharacter(World, 0)))
+		{
+			Player->ApplyMovementMods();
+			Player->ApplyMaxHPMod();
+			Player->UpdateArtifactHUD();
+		}
+	}
+	return true;
+}
+
 void ULoopedGameInstance::ResetTreasurePicks()
 {
 	CurrentRoomPicks = 0;
@@ -1363,7 +1820,13 @@ void ULoopedGameInstance::ResetTreasurePicks()
 void ULoopedGameInstance::RegisterTreasurePick()
 {
 	++CurrentRoomPicks;
-	UE_LOG(LogLoopedCore, Display, TEXT("[Treasure] Pick registered (%d/%d)."), CurrentRoomPicks, MaxAllowedPicks);
+	UE_LOG(LogLoopedCore, Display, TEXT("[Treasure] Pick registered (%d/%d)."), CurrentRoomPicks, GetEffectiveMaxPicks());
+}
+
+int32 ULoopedGameInstance::GetEffectiveMaxPicks() const
+{
+	// Blessing "TwinPedestal": one extra pedestal pick per treasure room this run.
+	return MaxAllowedPicks + (HasRunArtifact(TEXT("TwinPedestal")) ? 1 : 0);
 }
 
 // Preview-only weighted roll, filtered by the cursed flag. No grant, no state change (const).
@@ -1443,6 +1906,7 @@ float ULoopedGameInstance::ProductArtifactMagnitude(FName TagName) const
 	return Product;
 }
 
+float ULoopedGameInstance::GetArtifactCritChance() const { return SumArtifactMagnitude(TEXT("Artifact.CritChance")); }
 float ULoopedGameInstance::GetArtifactFlatMaxHP() const  { return SumArtifactMagnitude(TEXT("Artifact.MaxHP")); }
 float ULoopedGameInstance::GetArtifactSpeedBonus() const { return SumArtifactMagnitude(TEXT("Artifact.MoveSpeed")); }
 float ULoopedGameInstance::GetArtifactGravityMult() const{ return ProductArtifactMagnitude(TEXT("Artifact.Gravity")); }
@@ -1466,6 +1930,12 @@ FText ULoopedGameInstance::GetCardUpgradePreviewText(FName CardId, int32 Current
 {
 	const FPassiveCardData* Row = FindCardRow(CardId);
 	if (!Row) return FText::GetEmpty();
+
+	// Curse "Amnesia": no upgrade math either — the numbers are gone.
+	if (HasCurse(TEXT("Amnesia")))
+	{
+		return FText::FromString(TEXT("??? -> ???"));
+	}
 
 	if (CurrentLevel >= Row->MaxLevel)
 	{
@@ -1510,4 +1980,97 @@ void ULoopedGameInstance::ResetPerks()
 #if !UE_BUILD_SHIPPING
 	// [GameInstance] PERKS WIPED on-screen message removed for a clean screen (UE_LOG above kept for dev).
 #endif
+}
+
+// --- Missions & hints (monitor State-1 guidance panel) --------------------------------------
+
+int32 ULoopedGameInstance::ResolveMissionCounter(EMissionCondition Type, FName Key) const
+{
+	switch (Type)
+	{
+	case EMissionCondition::None:
+		return 0;
+
+	case EMissionCondition::HasArtifact:
+		return HasArtifact(Key) ? 1 : 0;
+
+	case EMissionCondition::CardUnlocked:
+		return IsCardUnlocked(Key) ? 1 : 0;
+
+	case EMissionCondition::CurseActive:
+		// Named curse = 0/1; no key = how many curses are active (drives "you carry N curses").
+		return Key.IsNone() ? CurrentRunState.ActiveCurses.Num() : (HasCurse(Key) ? 1 : 0);
+
+	case EMissionCondition::StatAtLeast:
+	{
+		if (!Stats) return 0;
+		if (Key == TEXT("BossKills"))       return Stats->BossKills;
+		if (Key == TEXT("BossDeaths"))      return Stats->BossDeaths;
+		if (Key == TEXT("RoomClears"))      return Stats->RoomClears;
+		if (Key == TEXT("TotalEnemyKills")) return Stats->TotalEnemyKills;
+		if (Key == TEXT("RunsCompleted"))   return Stats->RunsCompleted;
+		if (Key == TEXT("TotalDeaths"))     return Stats->TotalDeaths;
+		if (Key == TEXT("Echoes"))          return Stats->Echoes;
+		if (Key == TEXT("MiraFragments"))   return Stats->MiraFragments;
+		if (Key == TEXT("SkillGaugeRanks")) return Stats->SkillGaugeRanks;
+		if (Key == TEXT("UnlockedCards"))   return Stats->UnlockedCards.Num();
+		if (Key == TEXT("Companions"))
+		{
+			// Rescued companions = the five rescue artifacts owned (Orin = the tutorial rescue).
+			static const FName Rescued[] = { FName("Orin"), FName("Lysa"), FName("Brann"), FName("Serin"), FName("Mira") };
+			int32 N = 0;
+			for (const FName& C : Rescued) { if (HasArtifact(C)) ++N; }
+			return N;
+		}
+		UE_LOG(LogLoopedCore, Warning, TEXT("[Missions] Unknown StatAtLeast key '%s' — row reads as 0."), *Key.ToString());
+		return 0;
+	}
+	}
+	return 0;
+}
+
+TArray<FMissionStatus> ULoopedGameInstance::EvaluateMissions() const
+{
+	TArray<FMissionStatus> Out;
+	if (!MissionTable) return Out;
+
+	for (const TPair<FName, uint8*>& Pair : MissionTable->GetRowMap())
+	{
+		const FMissionData* Row = reinterpret_cast<const FMissionData*>(Pair.Value);
+		if (!Row) continue;
+
+		// Visibility gate — chain-gates spoilers (Mira's hunt only appears after Serin).
+		if (Row->ActiveWhenType != EMissionCondition::None &&
+			ResolveMissionCounter(Row->ActiveWhenType, Row->ActiveWhenKey) < Row->ActiveWhenValue)
+		{
+			continue;
+		}
+
+		FMissionStatus S;
+		S.RowId    = Pair.Key;
+		S.Category = Row->Category;
+		S.Priority = Row->Priority;
+		S.Target   = FMath::Max(1, Row->TargetValue);
+		S.Current  = FMath::Clamp(ResolveMissionCounter(Row->ConditionType, Row->ConditionKey), 0, S.Target);
+		// ConditionType None never completes — a hint that lives purely on its gate.
+		S.bComplete = (Row->ConditionType != EMissionCondition::None) && (S.Current >= S.Target);
+
+		// Hints retire the moment their condition lands (the ransom hint dies with Serin freed).
+		if (S.Category == EMissionCategory::Hint && S.bComplete) continue;
+
+		FString Text = Row->Title.ToString();
+		Text.ReplaceInline(TEXT("{cur}"), *FString::FromInt(S.Current));
+		Text.ReplaceInline(TEXT("{max}"), *FString::FromInt(S.Target));
+		S.DisplayText = FText::FromString(Text);
+
+		Out.Add(S);
+	}
+
+	// Active work floats, finished missions sink; Priority orders within each half.
+	Out.Sort([](const FMissionStatus& A, const FMissionStatus& B)
+	{
+		if (A.bComplete != B.bComplete) return !A.bComplete;
+		return A.Priority < B.Priority;
+	});
+	return Out;
 }

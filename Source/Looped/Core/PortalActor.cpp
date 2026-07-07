@@ -131,6 +131,21 @@ void APortalActor::SetPortalEnabled(bool bEnabled)
 	{
 		LabelComp->SetVisibility(false); // a hidden portal hides its label too
 	}
+	// Editor-authored label ("ENTER THE LOOP") rides the portal's visibility. Fork portals
+	// (RoomTypeId set at runtime) own the widget through SetForkType instead.
+	else if (bEnabled && LabelComp && !PortalLabel.IsEmpty() && RoomTypeId.IsNone())
+	{
+		LabelComp->InitWidget();
+		if (UUserWidget* W = LabelComp->GetUserWidgetObject())
+		{
+			if (UTextBlock* T = Cast<UTextBlock>(W->GetWidgetFromName(TEXT("NameText"))))
+			{
+				T->SetText(PortalLabel);
+				T->SetColorAndOpacity(FSlateColor(FLinearColor(0.35f, 0.85f, 1.0f)));
+			}
+		}
+		LabelComp->SetVisibility(true);
+	}
 	// FX follows the portal's visibility — fixes "effects showing where the portal isn't".
 	if (PortalFX)
 	{
@@ -167,6 +182,15 @@ void APortalActor::SetForkType(FName InRoomTypeId)
 					Label = Row->DisplayLabel;
 				}
 				LabelColor = Row->LabelColor;
+			}
+
+			// Curse "Fogbound": the portals hide where they lead — every fork label reads the
+			// same fog-grey "???", so the player chooses rooms blind. The portal still WORKS
+			// (RoomTypeId is set above); only the label is blanked.
+			if (GI->HasCurse(TEXT("Fogbound")))
+			{
+				Label = FText::FromString(TEXT("???"));
+				LabelColor = FLinearColor(0.45f, 0.45f, 0.5f, 1.0f);
 			}
 		}
 	}

@@ -46,6 +46,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Portal")
 	bool bStartDisabled = false;
 
+	// Optional editor-authored floating label ("ENTER THE LOOP") — shows whenever the portal is
+	// visible, hides with it. Runtime fork labels (SetForkType) own the widget instead; leave this
+	// empty on fork portals. Empty = no label (every existing portal unchanged).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Portal")
+	FText PortalLabel;
+
 	// --- Portal FX (particles + light), baked into the portal so they hide/reveal WITH it ---
 	// The swirl particle system drawn at the portal. Defaults to NS_PortalSwirl (set in ctor); swap freely.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Portal|FX")

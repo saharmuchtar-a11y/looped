@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Data/DialogueData.h"
+#include "Core/LoopedInteractable.h"
 #include "DialogueTrigger.generated.h"
 
 class USphereComponent;
@@ -11,17 +12,27 @@ class UDataTable;
 class UStaticMeshComponent;
 class UStaticMesh;
 class UPointLightComponent;
+class UWidgetComponent;
 
 // Placeable event-room dialogue. Walks a DT_Dialogue node graph (branching choices) and applies each
 // choice's outcome via the existing GameInstance / player systems. Drop one in an Event ("?") level,
-// set DialogueTable + RootNode, and it fires when the player walks in.
+// set DialogueTable + RootNode. Starting is a deliberate press-E near the marker (a floating "[E]"
+// tag says so) — no more accidental mid-fight event pops; bAutoStartOnLoad rooms still auto-open.
 UCLASS(Blueprintable)
-class LOOPED_API ADialogueTrigger : public AActor
+class LOOPED_API ADialogueTrigger : public AActor, public ILoopedInteractable
 {
 	GENERATED_BODY()
 
 public:
 	ADialogueTrigger();
+
+	// Press-E near the marker — same guards the old walk-in start used.
+	virtual void Interact(class ALoopedCharacter* Player) override;
+	virtual float GetInteractRange() const override { return TriggerRadius + 60.0f; }
+	virtual FText GetInteractPrompt() const override
+	{
+		return (bOpen || (bOncePerLoad && bFired)) ? FText::GetEmpty() : FText::FromString(TEXT("investigate"));
+	}
 
 	// Dialogue source table (rows of FDialogueNode) and the node to open on.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Dialogue")
@@ -49,6 +60,31 @@ public:
 	// player to walk into the trigger sphere.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Dialogue")
 	bool bAutoStartOnLoad = false;
+
+	// --- Optional per-trigger palette (casino felt: green/black/red). Applied to WBP_Dialogue
+	// every open, defaults restored for untinted triggers via the same call. ---
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Dialogue|Theme")
+	bool bThemeDialogue = false;
+
+	// Standalone table panel (WBP_CasinoTable as a screen overlay) instead of mounting inside
+	// the arm monitor — Sahar: casino games shouldn't live in the monitor.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Dialogue|Theme")
+	bool bStandaloneWidget = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Dialogue|Theme", meta = (EditCondition = "bThemeDialogue"))
+	FLinearColor ThemePanelColor = FLinearColor(0.015f, 0.09f, 0.035f, 0.96f); // felt green
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Dialogue|Theme", meta = (EditCondition = "bThemeDialogue"))
+	FLinearColor ThemeSpeakerColor = FLinearColor(0.95f, 0.18f, 0.18f); // table red
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Dialogue|Theme", meta = (EditCondition = "bThemeDialogue"))
+	FLinearColor ThemeBodyColor = FLinearColor(0.88f, 0.96f, 0.88f); // chalk on felt
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Dialogue|Theme", meta = (EditCondition = "bThemeDialogue"))
+	FLinearColor ThemeButtonColor = FLinearColor(0.03f, 0.16f, 0.06f); // deep green
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Dialogue|Theme", meta = (EditCondition = "bThemeDialogue"))
+	FLinearColor ThemeResultColor = FLinearColor(0.95f, 0.18f, 0.18f); // wins/losses read in red
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Dialogue")
 	float TriggerRadius = 220.0f;
@@ -97,7 +133,12 @@ protected:
 	UPROPERTY(VisibleAnywhere, Category = "Dialogue|Marker")
 	UPointLightComponent* MarkerLight;
 
-	// Hide/show the "?" marker (mesh + light) together.
+	// Floating "[E]" prompt under the marker — the visible invitation to interact. Hidden along
+	// with the marker (and never shown for auto-start rooms).
+	UPROPERTY(VisibleAnywhere, Category = "Dialogue|Marker")
+	UWidgetComponent* PromptTagComp;
+
+	// Hide/show the "?" marker (mesh + light + [E] prompt) together.
 	void SetMarkerVisible(bool bVisible);
 
 private:
@@ -118,6 +159,26 @@ private:
 	// message when the choice closes the dialogue (so nothing ever overlaps the open panel).
 	FString ApplyOutcome(const FDialogueChoice& Choice);
 	void SetResultLine(const FString& Result);
+
+	// Paint (or restore) the dialogue widget's palette per this trigger's theme flags.
+	void ApplyDialogueTheme();
+
+	// --- Blackjack hand state (BlackjackDeal/Hit/Stand act on these between choices) ---
+	int32 BJPlayerTotal = 0;
+	int32 BJDealerUp = 0;
+	int32 BJWager = 0; // 0 = no hand in play
+
+	// Choice texts already fired this room-load for bOncePerRoom choices (the bar's drinks).
+	TSet<FString> UsedOnceChoices;
+
+	// Card faces for the WBP_Dialogue CardArea ("?" = the dealer's facedown card). Labels are
+	// display-only flavor (a drawn 10 may wear J/Q/K); the totals above carry the truth.
+	TArray<FString> BJDealerLabels;
+	TArray<FString> BJPlayerLabels;
+	TArray<bool> BJDealerRed;
+	TArray<bool> BJPlayerRed;
+	void PushBJCard(bool bDealer, int32 Value);
+	void UpdateBJCardArea(bool bShow);
 
 	UPROPERTY()
 	UUserWidget* DialogueWidget = nullptr;

@@ -64,6 +64,16 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|Enemy")
 	bool ApplyEnemyType(FName RowName);
 
+	// --- Meshy visual kit (DT_EnemyVisuals rows = FEnemyVisualSet; floor owns the LOOK) ---
+	// Swap this pawn's mesh + single-node anim set to a visual row. STATS untouched — safe
+	// mid-fight (the boss phase-2 transformation calls it live). Missing row/mesh = no-op false.
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Visual")
+	bool ApplyEnemyVisual(FName VisualRow);
+
+	// None (default) = auto-pick: "F<floor>_<Melee|Ranged>" for mooks, "Boss_F<floor>" for bosses.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Visual")
+	FName VisualRowOverride = NAME_None;
+
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|Enemy")
 	void Respawn();
 
@@ -384,7 +394,24 @@ private:
 	FTimerHandle DeathHideTimerHandle;
 	void FinishDeathHide();
 	// Plays a random DeathAnims entry as a DefaultSlot montage. Returns its play length, or 0 if none.
+	// (Visual-kit enemies bypass the montage: their Death sequence plays single-node instead.)
 	float PlayDeathAnim();
+
+	// --- Visual-kit runtime (see ApplyEnemyVisual) ---
+	FName AutoVisualRow() const;
+	void UpdateVisualAnim();
+	void PlayVisualAnim(class UAnimSequence* Anim, bool bLoop);
+
+	UPROPERTY() TObjectPtr<class UDataTable> VisualTable;
+	UPROPERTY() TObjectPtr<class UAnimSequence> VisIdle;
+	UPROPERTY() TObjectPtr<class UAnimSequence> VisWalk;
+	UPROPERTY() TObjectPtr<class UAnimSequence> VisRun;
+	UPROPERTY() TObjectPtr<class UAnimSequence> VisAttack;
+	UPROPERTY() TObjectPtr<class UAnimSequence> VisCast;
+	UPROPERTY() TObjectPtr<class UAnimSequence> VisDeath;
+	UPROPERTY() TObjectPtr<class UAnimSequence> CurrentVisAnim;
+	bool bVisualDriven = false;
+	FName CurrentVisualRow = NAME_None;
 	// Captured at BeginPlay so Respawn() can un-ragdoll the mesh back to its rig pose.
 	FTransform MeshDefaultRelativeTransform;
 
@@ -478,6 +505,19 @@ private:
 	void EndFreeze();
 	void DecayChillStacks();
 
+	// --- Wave-2 state ---
+	// Card "HuntersMark": set by the player's first hit; marked enemies take bonus damage from
+	// EVERYTHING (chains, DoT ticks, pops) because all of it routes through TakeDamageFromPlayer.
+	bool bMarkedByHunter = false;
+
+	// Curse "Haunted": this corpse already rose once — it stays down the second time.
+	bool bHauntedRespawnUsed = false;
+	FTimerHandle HauntedRiseTimerHandle;
+	void HauntedRise();
+
+	// Curse "Feverdream": scales windup/telegraph/special-windup durations (1.0 without it).
+	float GetTellDurationMult() const;
+
 	// AI state machine
 	float StateTimer = 0.0f;
 	float PathRefreshTimer = 0.0f;
@@ -528,7 +568,8 @@ private:
 	// Creative behaviors
 	FVector ComputeFlankPoint(const APawn* Player) const;
 	void CheckEnterFrenzy();
-	void AlertNearbyEnemies(AActor* Cause);
+	// bRoomWide = true alerts EVERY living enemy regardless of radius (curse "Bounty" on kills).
+	void AlertNearbyEnemies(AActor* Cause, bool bRoomWide = false);
 	void BeginTelegraph();
 	void FireTelegraphedShot();
 	void DeathPop();

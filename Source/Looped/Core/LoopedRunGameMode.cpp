@@ -47,6 +47,23 @@ void ALoopedRunGameMode::BeginPlay()
 	Super::BeginPlay();
 	bRunActive = true;
 
+	// Fresh save arriving at the Hub → tutorial first (Orin gives the monitor there).
+	// Contains() also matches PIE's UEDPIE_ map prefix; the tutorial level itself never
+	// redirects, and post-rescue the artifact is owned so the Hub loads normally forever.
+	if (!TutorialGateArtifact.IsNone() && !TutorialLevelName.IsNone() &&
+		GetWorld()->GetMapName().Contains(TEXT("L_Hub")))
+	{
+		if (ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
+		{
+			if (!GI->HasArtifact(TutorialGateArtifact))
+			{
+				UE_LOG(LogLoopedRun, Display, TEXT("[Tutorial] Fresh save — routing Hub -> %s."), *TutorialLevelName.ToString());
+				UGameplayStatics::OpenLevel(this, TutorialLevelName);
+				return;
+			}
+		}
+	}
+
 	// Run progress is read from the GameInstance's generated path (data-driven; no MapName
 	// string matching). This GameMode is recreated every level load, so it re-reads the node
 	// the player is currently in. Drives the "Room X / N" HUD via GetCurrentRoom/GetTotalRooms.
@@ -67,11 +84,29 @@ void ALoopedRunGameMode::BeginPlay()
 		{
 			const FRoomNode Node = GI->GetCurrentRoomNode();
 			CurrentRoomIndex = Node.RoomIndex;                  // 1-based room number (forks grow this)
-			TotalRoomsInFloor = GI->RunLengthBeforeBoss + 1;    // planned run length incl. the boss
+			TotalRoomsInFloor = GI->GetFloorRunLength() + 1;    // this floor's length incl. its boss
 			GI->CurrentRunRoom = Node.RoomIndex;                // keep the legacy counter in sync
 			// HP is ALWAYS visible during a run — merchant/treasure/event rooms included (Sahar:
 			// "hp must always be shown"; curses/statuses can drain you anywhere).
 			bShowPlayerHUD = true;
+
+			// Curse "Toll": every run-room door demands payment. Deferred a beat so the player
+			// pawn exists for the HP-fallback path.
+			if (GI->HasCurse(TEXT("Toll")))
+			{
+				FTimerHandle TollTimer;
+				GetWorldTimerManager().SetTimer(TollTimer, FTimerDelegate::CreateWeakLambda(GI, [GI]()
+				{
+					GI->ApplyRoomEntryToll();
+				}), 0.6f, false);
+			}
+
+			// Curse "Swarm": the loop sends extra bodies into every combat room.
+			if (Node.Type == ERoomType::Combat && GI->HasCurse(TEXT("Swarm")))
+			{
+				GetWorldTimerManager().SetTimer(SwarmSpawnTimerHandle, this,
+					&ALoopedRunGameMode::SpawnSwarmEnemies, 0.6f, false);
+			}
 
 			// Fresh treasure room — reset the "N of X" pick budget so pedestals are pickable.
 			if (Node.Type == ERoomType::Treasure)
@@ -229,6 +264,18 @@ void ALoopedRunGameMode::SpawnBossIfBossLevel()
 	{
 		// Slight scale bump to match the "chunky boss" silhouette from earlier sessions.
 		Boss->SetActorScale3D(FVector(1.6f, 1.6f, 1.6f));
+
+		// FLOORS: each floor names its boss (DT_Enemies row — Gatekeeper / Unbound / The Looped).
+		// The row overrides stats/color/scale wholesale; rows carry ABSOLUTE per-floor tuning.
+		if (ULoopedGameInstance* FloorGI = GetGameInstance<ULoopedGameInstance>())
+		{
+			const FName BossRow = FloorGI->GetFloorBossRow();
+			if (!BossRow.IsNone() && Boss->ApplyEnemyType(BossRow))
+			{
+				UE_LOG(LogLoopedRun, Display, TEXT("Boss row '%s' applied (floor %d)."),
+					*BossRow.ToString(), FloorGI->GetCurrentFloor());
+			}
+		}
 		BossSpawnedAtSeconds = World->GetTimeSeconds();
 		UE_LOG(LogLoopedRun, Display, TEXT("Boss spawned at %s (%s)"),
 			*SpawnLocation.ToCompactString(),
@@ -329,8 +376,23 @@ void ALoopedRunGameMode::HandleBossDied(AEnemyBase* /*Boss*/)
 	if (ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
 	{
 		GI->AddBossKill(KillSeconds);
-		GI->AddRunCompleted();
 		GI->AddEchoes(EchoesBossBonus); // boss-clear Echoes bonus
+
+		// FLOORS: a mid-run boss opens the DESCENT — the run continues (deck/relics/HP carry),
+		// so no AddRunCompleted and no EndRunPath. Only the final floor's boss ends the run.
+		if (!GI->IsFinalFloor())
+		{
+			const FName NextRoom = GI->BeginNextFloor();
+			SpawnDescentPortal(NextRoom);
+			if (ALoopedCharacter* Player = Cast<ALoopedCharacter>(UGameplayStatics::GetPlayerCharacter(this, 0)))
+			{
+				Player->ShowCenterMessage(FText::FromString(TEXT("The loop deepens...")), 4.0f);
+			}
+			UE_LOG(LogLoopedRun, Display, TEXT("Floor boss down in %.1fs — descent portal to '%s' (floor %d)."),
+				KillSeconds, *NextRoom.ToString(), GI->GetCurrentFloor());
+			return;
+		}
+		GI->AddRunCompleted(); // The Looped has fallen — the run is truly complete
 	}
 
 	// Boss is C++-spawned, so ABossRoomExit::BeginPlay couldn't see it at level load.
@@ -414,10 +476,11 @@ void ALoopedRunGameMode::NotifyAllEnemiesDefeated()
 	UE_LOG(LogLoopedRun, Display, TEXT("Enemy defeated. (room death-events: %d)"), ++RoomClearCount);
 	OnRoomCleared.Broadcast();
 
-	// Per-run Shards drop for the kill (this fires once per enemy death).
+	// Per-run Shards drop + the lifetime kill counter (this fires once per enemy death).
 	if (ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
 	{
 		GI->AddShards(ShardsPerEnemy);
+		GI->AddEnemyKill(); // drives kill-count unlocks (Echo at 150)
 	}
 
 	// --- Persistent RoomClears stat (authoritative in C++) ---
@@ -443,9 +506,81 @@ void ALoopedRunGameMode::NotifyAllEnemiesDefeated()
 			GI->AddEchoes(EchoesPerRoom * FMath::Max(1, CurrentRoomIndex));
 			// Per-run Shards room-clear bonus.
 			GI->AddShards(ShardsRoomClearBonus);
+
+			// Card "SecondSkin": clearing a room knits you back together (heal from the level row).
+			if (const FPassiveCardLevel* SkinLv = GI->GetEffectiveLevelData(TEXT("SecondSkin")))
+			{
+				if (SkinLv->HealAmount > 0.0f)
+				{
+					if (ALoopedCharacter* Player = Cast<ALoopedCharacter>(UGameplayStatics::GetPlayerCharacter(this, 0)))
+					{
+						Player->HealPlayer(SkinLv->HealAmount);
+						UE_LOG(LogLoopedRun, Display, TEXT("[Card] Second Skin healed %.0f on room clear."), SkinLv->HealAmount);
+					}
+				}
+			}
 		}
 		UE_LOG(LogLoopedRun, Display, TEXT("Room cleared — RoomClears stat incremented."));
 	}
+}
+
+bool ALoopedRunGameMode::TryConsumeHauntedToken()
+{
+	if (bHauntedTokenUsed) return false;
+	bHauntedTokenUsed = true;
+	return true;
+}
+
+void ALoopedRunGameMode::SpawnSwarmEnemies()
+{
+	// Curse "Swarm": clone a placed enemy N times at nav points away from the player. Clones use
+	// the SAME class as an existing enemy (BP subclasses included) so they match the room's kit.
+	ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>();
+	if (!GI || !GI->HasCurse(TEXT("Swarm"))) return;
+
+	AEnemyBase* Template = nullptr;
+	for (TActorIterator<AEnemyBase> It(GetWorld()); It; ++It)
+	{
+		AEnemyBase* E = *It;
+		if (E && E->IsAlive() && !E->IsA(ABossBase::StaticClass()))
+		{
+			Template = E;
+			break;
+		}
+	}
+	if (!Template)
+	{
+		UE_LOG(LogLoopedRun, Display, TEXT("[Curse] Swarm: no placed enemy to clone — skipped."));
+		return;
+	}
+
+	APawn* PlayerPawn = GetWorld()->GetFirstPlayerController() ? GetWorld()->GetFirstPlayerController()->GetPawn() : nullptr;
+	const FVector PlayerLoc = PlayerPawn ? PlayerPawn->GetActorLocation() : FVector::ZeroVector;
+	UNavigationSystemV1* NavSys = UNavigationSystemV1::GetCurrent(GetWorld());
+
+	int32 Spawned = 0;
+	for (int32 i = 0; i < FMath::Max(1, GI->CurseSwarmExtraEnemies); ++i)
+	{
+		FVector SpawnLoc = Template->GetActorLocation();
+		if (NavSys)
+		{
+			for (int32 Tries = 0; Tries < 16; ++Tries)
+			{
+				FNavLocation NavLoc;
+				if (!NavSys->GetRandomReachablePointInRadius(Template->GetActorLocation(), 2000.0f, NavLoc)) continue;
+				if (PlayerPawn && FVector::Dist2D(NavLoc.Location, PlayerLoc) < 700.0f) continue;
+				SpawnLoc = NavLoc.Location + FVector(0, 0, 100.0f);
+				break;
+			}
+		}
+		FActorSpawnParameters Params;
+		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+		if (AEnemyBase* Clone = GetWorld()->SpawnActor<AEnemyBase>(Template->GetClass(), SpawnLoc, FRotator::ZeroRotator, Params))
+		{
+			++Spawned;
+		}
+	}
+	UE_LOG(LogLoopedRun, Display, TEXT("[Curse] Swarm spawned %d extra enem%s."), Spawned, Spawned == 1 ? TEXT("y") : TEXT("ies"));
 }
 
 void ALoopedRunGameMode::RespawnAllEnemies()
@@ -560,6 +695,30 @@ void ALoopedRunGameMode::SpawnHubPortal(FName Destination)
 			Portal->TargetLevelName = Destination;
 			Portal->SetActorLabel(TEXT("RunPortal"));
 			UE_LOG(LogLoopedRun, Display, TEXT("Portal spawned → %s"), *Destination.ToString());
+		}
+	}
+}
+
+void ALoopedRunGameMode::SpawnDescentPortal(FName Destination)
+{
+	// Like SpawnHubPortal but the run CONTINUES: no EndRunPath (the path index must survive into
+	// the next floor's first room) and the portal advertises the way down.
+	if (ACharacter* Player = UGameplayStatics::GetPlayerCharacter(this, 0))
+	{
+		FVector SpawnLoc = Player->GetActorLocation() + Player->GetActorForwardVector() * 400.0f;
+		SpawnLoc.Z = Player->GetActorLocation().Z;
+
+		FActorSpawnParameters Params;
+		APortalActor* Portal = GetWorld()->SpawnActor<APortalActor>(SpawnLoc, FRotator::ZeroRotator, Params);
+		if (Portal)
+		{
+			Portal->TargetLevelName = Destination;
+			Portal->PortalLabel = FText::FromString(TEXT("DESCEND"));
+			Portal->SetActorLabel(TEXT("DescentPortal"));
+			// BeginPlay already ran during SpawnActor (before the label was set) — re-enable so
+			// the label paints. ActivatePortal is safe to call repeatedly.
+			Portal->ActivatePortal();
+			UE_LOG(LogLoopedRun, Display, TEXT("Descent portal spawned → %s"), *Destination.ToString());
 		}
 	}
 }

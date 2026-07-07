@@ -2,11 +2,14 @@
 #include "Components/SphereComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/PointLightComponent.h"
+#include "Components/WidgetComponent.h"
 #include "Engine/StaticMesh.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Blueprint/UserWidget.h"
 #include "Components/TextBlock.h"
 #include "Components/Button.h"
+#include "Components/Image.h"
+#include "Components/Border.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "Core/LoopedGameInstance.h"
@@ -46,12 +49,29 @@ ADialogueTrigger::ADialogueTrigger()
 	MarkerLight->SetAttenuationRadius(600.0f);
 	MarkerLight->SetLightColor(MarkerLightColor);
 	MarkerLight->SetCastShadows(false);
+
+	// Floating "[E]" prompt — the interact invitation (text filled in BeginPlay). Screen-space,
+	// hidden until the marker shows.
+	PromptTagComp = CreateDefaultSubobject<UWidgetComponent>(TEXT("PromptTagComp"));
+	PromptTagComp->SetupAttachment(SceneRoot);
+	PromptTagComp->SetRelativeLocation(FVector(0.0f, 0.0f, 120.0f));
+	PromptTagComp->SetWidgetSpace(EWidgetSpace::Screen);
+	PromptTagComp->SetDrawSize(FVector2D(200.0f, 60.0f));
+	PromptTagComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	PromptTagComp->SetVisibility(false);
+	static ConstructorHelpers::FClassFinder<UUserWidget> PromptClass(TEXT("/Game/UI/WBP_NameTag"));
+	if (PromptClass.Succeeded())
+	{
+		PromptTagComp->SetWidgetClass(PromptClass.Class);
+	}
 }
 
 void ADialogueTrigger::SetMarkerVisible(bool bVisible)
 {
 	if (MarkerMesh)  MarkerMesh->SetVisibility(bVisible);
 	if (MarkerLight) MarkerLight->SetVisibility(bVisible);
+	// Static "[E]" tag retired — the proximity prompt ("Press [E] to investigate") covers it.
+	if (PromptTagComp) PromptTagComp->SetVisibility(false);
 }
 
 void ADialogueTrigger::BeginPlay()
@@ -72,6 +92,20 @@ void ADialogueTrigger::BeginPlay()
 		MarkerLight->SetLightColor(MarkerLightColor);
 		MarkerLight->SetIntensity(MarkerLightIntensity);
 		MarkerLight->SetRelativeLocation(MarkerOffset);
+	}
+	// Fill the "[E]" prompt (rides the marker offset so it hugs whatever the marker is).
+	if (PromptTagComp)
+	{
+		PromptTagComp->SetRelativeLocation(MarkerOffset + FVector(0.0f, 0.0f, 120.0f));
+		PromptTagComp->InitWidget();
+		if (UUserWidget* W = PromptTagComp->GetUserWidgetObject())
+		{
+			if (UTextBlock* T = Cast<UTextBlock>(W->GetWidgetFromName(TEXT("NameText"))))
+			{
+				T->SetText(FText::FromString(TEXT("[E]")));
+				T->SetColorAndOpacity(FSlateColor(MarkerLightColor));
+			}
+		}
 	}
 	SetMarkerVisible(true);
 
@@ -107,9 +141,13 @@ void ADialogueTrigger::AutoStart()
 void ADialogueTrigger::OnOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor, UPrimitiveComponent* OtherComp,
 	int32 OtherBodyIndex, bool bFromSweep, const FHitResult& Sweep)
 {
-	if (!OtherActor) return;
-	APawn* Pawn = Cast<APawn>(OtherActor);
-	if (!Pawn || !Pawn->IsPlayerControlled()) return;
+	// Walk-in no longer starts the talk — that's the deliberate press-E in Interact (the "[E]"
+	// prompt under the marker says so). Kept bound for possible future proximity hints.
+}
+
+void ADialogueTrigger::Interact(ALoopedCharacter* Player)
+{
+	// Same guards the old walk-in start used.
 	if (bOpen) return;
 	if (bOncePerLoad && bFired) return;
 
@@ -139,9 +177,12 @@ void ADialogueTrigger::StartDialogue(FName NodeId)
 	APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
 
 	// Create the widget once + bind the fixed choice buttons. Loaded at runtime (robust to asset order).
+	// Standalone triggers (casino) use the fullscreen table layout; monitor dialogues keep WBP_Dialogue.
 	if (!DialogueWidget && PC)
 	{
-		TSubclassOf<UUserWidget> Cls = LoadClass<UUserWidget>(nullptr, TEXT("/Game/UI/WBP_Dialogue.WBP_Dialogue_C"));
+		TSubclassOf<UUserWidget> Cls = LoadClass<UUserWidget>(nullptr, bStandaloneWidget
+			? TEXT("/Game/UI/WBP_CasinoTable.WBP_CasinoTable_C")
+			: TEXT("/Game/UI/WBP_Dialogue.WBP_Dialogue_C"));
 		if (Cls)
 		{
 			DialogueWidget = CreateWidget<UUserWidget>(PC, Cls);
@@ -151,6 +192,7 @@ void ADialogueTrigger::StartDialogue(FName NodeId)
 				if (UButton* B = Cast<UButton>(DialogueWidget->GetWidgetFromName(TEXT("Choice1Button")))) B->OnClicked.AddDynamic(this, &ADialogueTrigger::OnChoice1);
 				if (UButton* B = Cast<UButton>(DialogueWidget->GetWidgetFromName(TEXT("Choice2Button")))) B->OnClicked.AddDynamic(this, &ADialogueTrigger::OnChoice2);
 				if (UButton* B = Cast<UButton>(DialogueWidget->GetWidgetFromName(TEXT("Choice3Button")))) B->OnClicked.AddDynamic(this, &ADialogueTrigger::OnChoice3);
+				ApplyDialogueTheme(); // each trigger owns its widget instance — paint once at creation
 			}
 		}
 	}
@@ -161,9 +203,9 @@ void ADialogueTrigger::StartDialogue(FName NodeId)
 	}
 
 	// Dialogue lives INSIDE the arm monitor (slow-mo, cursor, dashboard hidden) when the player
-	// pawn is ours; plain viewport overlay as fallback.
+	// pawn is ours — EXCEPT standalone triggers (casino tables), which own the screen directly.
 	ALoopedCharacter* PlayerChar = PC ? Cast<ALoopedCharacter>(PC->GetPawn()) : nullptr;
-	if (PlayerChar)
+	if (PlayerChar && !bStandaloneWidget)
 	{
 		PlayerChar->MountDialogueInMonitor(DialogueWidget);
 	}
@@ -206,6 +248,10 @@ static FString OutcomeHint(const FDialogueChoice& C)
 	case EDialogueOutcome::UpgradeRandomCard: return TEXT("(upgrade a card)");
 	case EDialogueOutcome::CleanseCurse:      return TEXT("(cleanse a curse)");
 	case EDialogueOutcome::GambleShards:      return FString::Printf(TEXT("(wager %d Shards)"), C.OutcomeAmount);
+	case EDialogueOutcome::SlotSpin:
+	case EDialogueOutcome::RouletteBet:
+	case EDialogueOutcome::BlackjackDeal:
+	case EDialogueOutcome::CoinFlip:          return FString::Printf(TEXT("(wager %d)"), C.OutcomeAmount);
 	default:                                  return FString();
 	}
 }
@@ -271,7 +317,15 @@ void ADialogueTrigger::ShowNode(const FDialogueNode& Node)
 				break;
 			case EDialogueOutcome::SpendShards:
 			case EDialogueOutcome::GambleShards:
+			case EDialogueOutcome::SlotSpin:
+			case EDialogueOutcome::RouletteBet:
+			case EDialogueOutcome::BlackjackDeal:
+			case EDialogueOutcome::CoinFlip:
 				bUsable = GI && GI->GetShards() >= C.OutcomeAmount;
+				break;
+			case EDialogueOutcome::BlackjackHit:
+			case EDialogueOutcome::BlackjackStand:
+				bUsable = BJWager > 0; // no hand, no buttons (Leave stays open)
 				break;
 			case EDialogueOutcome::Damage:
 				// No suicide buttons: paying HP you don't have stays locked.
@@ -293,6 +347,12 @@ void ADialogueTrigger::ShowNode(const FDialogueNode& Node)
 				break;
 			}
 
+			// Once-per-room choices (the bar's drinks): spent = locked until the room reloads.
+			if (C.bOncePerRoom && UsedOnceChoices.Contains(C.ChoiceText.ToString()))
+			{
+				bUsable = false;
+			}
+
 			// A node's ONLY exit can never be locked — otherwise the dialogue becomes a trap
 			// (e.g. paid the basin's price, no curse to cleanse, Continue greyed out = stuck).
 			// The outcome whiffs gracefully instead ("Nothing to cleanse.").
@@ -309,6 +369,20 @@ void ADialogueTrigger::ShowNode(const FDialogueNode& Node)
 		}
 		if (Txt) Txt->SetText(Label);
 	}
+
+	// The card table renders only on blackjack nodes that actually have cards on the felt.
+	bool bBJNode = false;
+	for (const FDialogueChoice& C : CurrentChoices)
+	{
+		if (C.Outcome == EDialogueOutcome::BlackjackDeal
+			|| C.Outcome == EDialogueOutcome::BlackjackHit
+			|| C.Outcome == EDialogueOutcome::BlackjackStand)
+		{
+			bBJNode = true;
+			break;
+		}
+	}
+	UpdateBJCardArea(bBJNode && BJPlayerLabels.Num() > 0);
 }
 
 void ADialogueTrigger::OnChoice0() { HandleChoice(0); }
@@ -354,6 +428,91 @@ void ADialogueTrigger::HandleChoice(int32 Index)
 	}
 }
 
+void ADialogueTrigger::PushBJCard(bool bDealer, int32 Value)
+{
+	// Display flavor: an 11 is the Ace; a 10 wears a random court face. Truth stays in the totals.
+	FString Label;
+	if (Value >= 11)      Label = TEXT("A");
+	else if (Value == 10) { static const TCHAR* Faces[] = { TEXT("10"), TEXT("J"), TEXT("Q"), TEXT("K") }; Label = Faces[FMath::RandRange(0, 3)]; }
+	else                  Label = FString::FromInt(Value);
+	const bool bRed = FMath::RandBool();
+	(bDealer ? BJDealerLabels : BJPlayerLabels).Add(Label);
+	(bDealer ? BJDealerRed : BJPlayerRed).Add(bRed);
+}
+
+void ADialogueTrigger::UpdateBJCardArea(bool bShow)
+{
+	if (!DialogueWidget) return;
+
+	if (UWidget* Area = DialogueWidget->GetWidgetFromName(TEXT("CardArea")))
+	{
+		Area->SetVisibility(bShow ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+	}
+	if (!bShow) return;
+
+	if (UTextBlock* PL = Cast<UTextBlock>(DialogueWidget->GetWidgetFromName(TEXT("PlayerLbl"))))
+	{
+		PL->SetText(FText::FromString(BJPlayerLabels.Num() > 0
+			? FString::Printf(TEXT("YOU — %d"), BJPlayerTotal) : FString(TEXT("YOU"))));
+	}
+
+	const FLinearColor FaceUp(0.96f, 0.96f, 0.92f);
+	const FLinearColor FaceDown(0.22f, 0.25f, 0.32f);
+	struct { const TCHAR* Tag; const TArray<FString>* Labels; const TArray<bool>* Red; } Rows[] = {
+		{ TEXT("D"), &BJDealerLabels, &BJDealerRed },
+		{ TEXT("P"), &BJPlayerLabels, &BJPlayerRed },
+	};
+	for (const auto& Row : Rows)
+	{
+		for (int32 i = 0; i < 6; ++i)
+		{
+			UBorder* Card = Cast<UBorder>(DialogueWidget->GetWidgetFromName(*FString::Printf(TEXT("Card%s%d"), Row.Tag, i)));
+			UTextBlock* Txt = Cast<UTextBlock>(DialogueWidget->GetWidgetFromName(*FString::Printf(TEXT("Card%s%dText"), Row.Tag, i)));
+			const bool bHas = Row.Labels->IsValidIndex(i);
+			if (Card) Card->SetVisibility(bHas ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+			if (!bHas || !Card || !Txt) continue;
+			const FString& L = (*Row.Labels)[i];
+			const bool bFaceDown = (L == TEXT("?"));
+			Card->SetBrushColor(bFaceDown ? FaceDown : FaceUp);
+			Txt->SetText(FText::FromString(L));
+			Txt->SetColorAndOpacity(FSlateColor(bFaceDown ? FLinearColor(0.6f, 0.65f, 0.75f)
+				: (*Row.Red)[i] ? FLinearColor(0.75f, 0.08f, 0.08f)
+				                : FLinearColor(0.05f, 0.05f, 0.05f)));
+		}
+	}
+}
+
+void ADialogueTrigger::ApplyDialogueTheme()
+{
+	// Untinted triggers keep the widget's designed look (each trigger owns its own instance,
+	// so painting one machine never bleeds into normal event dialogues).
+	if (!DialogueWidget || !bThemeDialogue) return;
+
+	if (UImage* BG = Cast<UImage>(DialogueWidget->GetWidgetFromName(TEXT("PanelBG"))))
+	{
+		BG->SetColorAndOpacity(ThemePanelColor);
+	}
+	if (UTextBlock* T = Cast<UTextBlock>(DialogueWidget->GetWidgetFromName(TEXT("SpeakerText"))))
+	{
+		T->SetColorAndOpacity(FSlateColor(ThemeSpeakerColor));
+	}
+	if (UTextBlock* T = Cast<UTextBlock>(DialogueWidget->GetWidgetFromName(TEXT("BodyText"))))
+	{
+		T->SetColorAndOpacity(FSlateColor(ThemeBodyColor));
+	}
+	if (UTextBlock* T = Cast<UTextBlock>(DialogueWidget->GetWidgetFromName(TEXT("ResultText"))))
+	{
+		T->SetColorAndOpacity(FSlateColor(ThemeResultColor));
+	}
+	for (int32 i = 0; i < 4; ++i)
+	{
+		if (UButton* B = Cast<UButton>(DialogueWidget->GetWidgetFromName(*FString::Printf(TEXT("Choice%dButton"), i))))
+		{
+			B->SetBackgroundColor(ThemeButtonColor);
+		}
+	}
+}
+
 void ADialogueTrigger::SetResultLine(const FString& Result)
 {
 	if (!DialogueWidget || Result.IsEmpty()) return;
@@ -371,6 +530,12 @@ void ADialogueTrigger::SetResultLine(const FString& Result)
 
 FString ADialogueTrigger::ApplyOutcome(const FDialogueChoice& Choice)
 {
+	// Spend once-per-room choices the moment they fire (ShowNode locks them from here on).
+	if (Choice.bOncePerRoom)
+	{
+		UsedOnceChoices.Add(Choice.ChoiceText.ToString());
+	}
+
 	ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>();
 	ALoopedCharacter* Player = nullptr;
 	if (APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr)
@@ -512,6 +677,164 @@ FString ADialogueTrigger::ApplyOutcome(const FDialogueChoice& Choice)
 			}
 		}
 		break;
+
+	case EDialogueOutcome::SlotSpin:
+		if (GI && Choice.OutcomeAmount > 0)
+		{
+			if (!GI->SpendShards(Choice.OutcomeAmount)) { Result = TEXT("Not enough Shards..."); break; }
+			// Three weighted reels — VOID is the rare face (8%).
+			static const TCHAR* Faces[] = { TEXT("SKULL"), TEXT("BELL"), TEXT("EYE"), TEXT("VOID") };
+			auto RollReel = []() -> int32
+			{
+				const float R = FMath::FRand();
+				return (R < 0.34f) ? 0 : (R < 0.68f) ? 1 : (R < 0.92f) ? 2 : 3;
+			};
+			const int32 R1 = RollReel(), R2 = RollReel(), R3 = RollReel();
+			const FString Reels = FString::Printf(TEXT("[ %s | %s | %s ]"), Faces[R1], Faces[R2], Faces[R3]);
+			int32 Pay = 0;
+			FString Verdict = TEXT("Nothing.");
+			if (R1 == R2 && R2 == R3)
+			{
+				Pay = Choice.OutcomeAmount * (R1 == 3 ? 10 : 5);
+				Verdict = (R1 == 3) ? TEXT("VOID JACKPOT!") : TEXT("TRIPLE!");
+			}
+			else if (R1 == R2 || R2 == R3 || R1 == R3)
+			{
+				Pay = FMath::CeilToInt(Choice.OutcomeAmount * 1.5f);
+				Verdict = TEXT("A pair.");
+			}
+			if (Pay > 0) GI->AddShards(Pay);
+			Result = FString::Printf(TEXT("%s  %s  %+d Shards"), *Reels, *Verdict, Pay - Choice.OutcomeAmount);
+		}
+		break;
+
+	case EDialogueOutcome::RouletteBet:
+		if (GI && Choice.OutcomeAmount > 0)
+		{
+			if (!GI->SpendShards(Choice.OutcomeAmount)) { Result = TEXT("Not enough Shards..."); break; }
+			const int32 Pocket = FMath::RandRange(0, 36); // 0 = the green void
+			const bool bRed = (Pocket != 0) && (Pocket % 2 == 1);
+			const FString PocketStr = (Pocket == 0) ? TEXT("GREEN 0")
+				: FString::Printf(TEXT("%s %d"), bRed ? TEXT("RED") : TEXT("BLACK"), Pocket);
+
+			bool bWin = false; int32 Pay = 0;
+			if (Choice.OutcomeId == TEXT("Green"))    { bWin = (Pocket == 0);           Pay = Choice.OutcomeAmount * 10; }
+			else if (Choice.OutcomeId == TEXT("Red")) { bWin = bRed;                    Pay = Choice.OutcomeAmount * 2; }
+			else                                      { bWin = !bRed && Pocket != 0;    Pay = Choice.OutcomeAmount * 2; }
+			if (bWin)
+			{
+				GI->AddShards(Pay);
+				Result = FString::Printf(TEXT("The ball settles on %s — you called it! +%d Shards"), *PocketStr, Pay - Choice.OutcomeAmount);
+			}
+			else
+			{
+				Result = FString::Printf(TEXT("The ball settles on %s. -%d Shards"), *PocketStr, Choice.OutcomeAmount);
+			}
+		}
+		break;
+
+	case EDialogueOutcome::BlackjackDeal:
+		if (GI && Choice.OutcomeAmount > 0)
+		{
+			if (!GI->SpendShards(Choice.OutcomeAmount)) { Result = TEXT("Not enough Shards..."); break; }
+			BJWager = Choice.OutcomeAmount;
+			const int32 C1 = FMath::RandRange(2, 11);
+			const int32 C2 = FMath::RandRange(2, 11);
+			BJPlayerTotal = (C1 + C2 == 22) ? 12 : C1 + C2; // double aces soften
+			BJDealerUp = FMath::RandRange(2, 11);
+			// Fresh table: your two cards face-up, dealer's upcard + one facedown.
+			BJPlayerLabels.Reset(); BJPlayerRed.Reset();
+			BJDealerLabels.Reset(); BJDealerRed.Reset();
+			PushBJCard(false, C1);
+			PushBJCard(false, C2);
+			PushBJCard(true, BJDealerUp);
+			BJDealerLabels.Add(TEXT("?")); BJDealerRed.Add(false);
+			Result = FString::Printf(TEXT("You draw %d + %d = %d. Dealer shows %d."), C1, C2, BJPlayerTotal, BJDealerUp);
+			if (BJPlayerTotal == 21)
+			{
+				const int32 Pay = FMath::CeilToInt(BJWager * 2.5f);
+				GI->AddShards(Pay);
+				Result += FString::Printf(TEXT("  NATURAL 21! +%d Shards"), Pay - BJWager);
+				BJWager = 0; // hand over
+			}
+		}
+		break;
+
+	case EDialogueOutcome::BlackjackHit:
+		if (GI)
+		{
+			if (BJWager <= 0) { Result = TEXT("No hand in play."); break; }
+			const int32 C = FMath::RandRange(2, 11);
+			BJPlayerTotal += C;
+			PushBJCard(false, C);
+			if (BJPlayerTotal > 21)
+			{
+				Result = FString::Printf(TEXT("You draw %d — %d. BUST. -%d Shards"), C, BJPlayerTotal, BJWager);
+				BJWager = 0;
+			}
+			else
+			{
+				Result = FString::Printf(TEXT("You draw %d — %d total. Dealer shows %d."), C, BJPlayerTotal, BJDealerUp);
+			}
+		}
+		break;
+
+	case EDialogueOutcome::BlackjackStand:
+		if (GI)
+		{
+			if (BJWager <= 0) { Result = TEXT("No hand in play."); break; }
+			int32 Dealer = BJDealerUp;
+			FString Draws = FString::Printf(TEXT("Dealer: %d"), Dealer);
+			// The facedown card flips into real draws.
+			if (BJDealerLabels.Num() > 0 && BJDealerLabels.Last() == TEXT("?"))
+			{
+				BJDealerLabels.Pop(); BJDealerRed.Pop();
+			}
+			while (Dealer < 17)
+			{
+				const int32 C = FMath::RandRange(2, 11);
+				Dealer += C;
+				PushBJCard(true, C);
+				Draws += FString::Printf(TEXT(" +%d"), C);
+			}
+			if (Dealer > 21 || BJPlayerTotal > Dealer)
+			{
+				const int32 Pay = BJWager * 2;
+				GI->AddShards(Pay);
+				Result = FString::Printf(TEXT("%s = %d. Your %d takes it — WIN! +%d Shards"), *Draws, Dealer, BJPlayerTotal, Pay - BJWager);
+			}
+			else if (Dealer == BJPlayerTotal)
+			{
+				GI->AddShards(BJWager);
+				Result = FString::Printf(TEXT("%s = %d. Push — wager returned."), *Draws, Dealer);
+			}
+			else
+			{
+				Result = FString::Printf(TEXT("%s = %d against your %d. House wins. -%d Shards"), *Draws, Dealer, BJPlayerTotal, BJWager);
+			}
+			BJWager = 0;
+		}
+		break;
+
+	case EDialogueOutcome::CoinFlip:
+		if (GI && Choice.OutcomeAmount > 0)
+		{
+			if (!GI->SpendShards(Choice.OutcomeAmount)) { Result = TEXT("Not enough Shards..."); break; }
+			const bool bSkulls = FMath::FRand() < 0.5f;
+			const bool bCalledSkulls = (Choice.OutcomeId != TEXT("Spirals")); // default call = Skulls
+			const FString Landed = bSkulls ? TEXT("SKULLS") : TEXT("SPIRALS");
+			if (bSkulls == bCalledSkulls)
+			{
+				GI->AddShards(Choice.OutcomeAmount * 2);
+				Result = FString::Printf(TEXT("The coin lands %s — you called it! +%d Shards"), *Landed, Choice.OutcomeAmount);
+			}
+			else
+			{
+				Result = FString::Printf(TEXT("The coin lands %s. The barkeep pockets it. -%d Shards"), *Landed, Choice.OutcomeAmount);
+			}
+		}
+		break;
+
 	case EDialogueOutcome::None:
 	default:
 		break;
@@ -528,10 +851,11 @@ void ADialogueTrigger::CloseDialogue()
 	SetMarkerVisible(false);
 	if (APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr)
 	{
-		// Monitor-mounted path: restore the dashboard + close the monitor (time/cursor restored there).
+		// Monitor-mounted path: restore the dashboard + close the monitor (time/cursor restored
+		// there). Standalone (casino) widgets never mounted — nothing to restore.
 		if (ALoopedCharacter* PlayerChar = Cast<ALoopedCharacter>(PC->GetPawn()))
 		{
-			PlayerChar->UnmountDialogueFromMonitor(DialogueWidget);
+			if (!bStandaloneWidget) PlayerChar->UnmountDialogueFromMonitor(DialogueWidget);
 		}
 		PC->bShowMouseCursor = false;
 		FInputModeGameOnly Mode;

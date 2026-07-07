@@ -2,6 +2,8 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Styling/SlateColor.h"
+#include "Core/LoopedInteractable.h"
 #include "HubMerchant.generated.h"
 
 class USphereComponent;
@@ -22,8 +24,15 @@ enum class EShopGoodType : uint8
 	CleanseCurse,       // in-run: remove an active curse, paid in Shards
 	ShardExchange,      // in-run: convert Shards -> permanent Echoes (poor rate)
 	RunBlessing,        // in-run: a random run Blessing, paid in Shards (the cache's star item)
-	RunMaxHP            // in-run: "Void Vigor" — +max HP for THIS run only
+	RunMaxHP,           // in-run: "Void Vigor" — +max HP for THIS run only
+	CompanionRansom,    // hub: buy Serin's freedom — Echoes + a curse stamped on the next run
+	SellRunRelic,       // in-run SELL page: pawn a held run relic — Cost = Shards YOU RECEIVE
+	SellQueuedCard,     // hub SELL page: refund a queued next-run boon — Cost = Echoes YOU RECEIVE
+	SellPermRelic       // hub SELL page: sell a permanent relic — Cost = Echoes YOU RECEIVE
 };
+
+// Which book-style tab page the shop is showing (WARES | VAULT | SELL).
+enum class EShopSection : uint8 { Wares, Vault, Sell };
 
 /**
  * Hub merchant "Vorr, the Hollow Broker". Walk into the trigger -> WBP_Merchant opens.
@@ -35,12 +44,21 @@ enum class EShopGoodType : uint8
  * Buttons bind from C++ by name — same pattern as the Boss/Room HUDs.
  */
 UCLASS()
-class LOOPED_API AHubMerchant : public AActor
+class LOOPED_API AHubMerchant : public AActor, public ILoopedInteractable
 {
 	GENERATED_BODY()
 
 public:
 	AHubMerchant();
+
+	// Press-E to trade. Walking in range no longer auto-opens the shop; walking OUT still
+	// auto-closes it.
+	virtual void Interact(class ALoopedCharacter* Player) override;
+	virtual float GetInteractRange() const override { return TriggerRadius; }
+	virtual FText GetInteractPrompt() const override
+	{
+		return bShopOpen ? FText::GetEmpty() : FText::FromString(TEXT("trade with Vorr"));
+	}
 
 protected:
 	virtual void BeginPlay() override;
@@ -117,13 +135,60 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Merchant|InRun")
 	int32 InRunStockSize = 2;  // how many random cards the cache offers
 
-	static constexpr int32 NumSlots = 5;
+	// Serin "Fence" (rescued-companion relic): every price in this shop is multiplied by this
+	// while Serin is rescued. Applied once in RefreshShop (TryBuy charges the Displayed cost, so
+	// display + charge always agree). The ONLY discount in the game — keep it unique.
+	UPROPERTY(EditDefaultsOnly, Category = "Merchant")
+	float SerinDiscountMult = 0.85f;
+
+	// WARES next-run boon prices by card rarity — the tier is FELT at the counter.
+	UPROPERTY(EditDefaultsOnly, Category = "Merchant|Wares")
+	int32 CardCostCommon = 70;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Merchant|Wares")
+	int32 CardCostRare = 130;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Merchant|Wares")
+	int32 CardCostEpic = 200;
+
+	// Hub WARES stocks a rotating FEW cards per visit (Sahar: not one of each), skipping
+	// already-queued ones. Rolled once per shop open so the offer holds steady while browsing.
+	UPROPERTY(EditDefaultsOnly, Category = "Merchant|Wares")
+	int32 RotatingWaresCount = 3;
+
+	// "Deal of the loop": one random wares row per visit sells at this multiplier, shown as a
+	// slashed original + red price (reuses the Fence display path).
+	UPROPERTY(EditDefaultsOnly, Category = "Merchant|Wares")
+	float DealDiscountMult = 0.7f;
+
+	// SELL page payouts. Pawning a run relic pays flat Shards; buying back a queued boon
+	// refunds this fraction of its catalogue price in Echoes (Vorr keeps his cut).
+	UPROPERTY(EditDefaultsOnly, Category = "Merchant|Sell")
+	int32 SellRelicShards = 45;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Merchant|Sell")
+	float QueuedCardRefundMult = 0.6f;
+
+	// --- Serin's ransom (the third rescue): offered in the hub WARES once Brann is rescued ---
+	UPROPERTY(EditDefaultsOnly, Category = "Merchant|Ransom")
+	int32 SerinRansomCost = 300;
+
+	// The cruelty Vorr stamps on your NEXT run as part of the price (the "never free" rule).
+	UPROPERTY(EditDefaultsOnly, Category = "Merchant|Ransom")
+	FName RansomCurseId = FName(TEXT("Marked"));
+
+	static constexpr int32 NumSlots = 9;
 
 	// In-run cache state (per shop visit).
 	TArray<FName> InRunStock;
 	int32 RerollCount = 0;
 	int32 HealBuyCount = 0;
 	void RollInRunStock();
+
+	// Hub WARES visit state: the rotating card offer + which row is this visit's deal.
+	TArray<FName> HubWaresStock;
+	FName DealCardId;
+	void RollHubWaresStock();
 
 	UFUNCTION()
 	void OnTriggerBegin(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
@@ -143,9 +208,15 @@ protected:
 	UFUNCTION() void OnBuy2();
 	UFUNCTION() void OnBuy3();
 	UFUNCTION() void OnBuy4();
+	UFUNCTION() void OnBuy5();
+	UFUNCTION() void OnBuy6();
+	UFUNCTION() void OnBuy7();
+	UFUNCTION() void OnBuy8();
 	UFUNCTION() void OnCloseClicked();
 	UFUNCTION() void OnResetClicked();
-	UFUNCTION() void OnToggleSection();
+	UFUNCTION() void OnTabWares();
+	UFUNCTION() void OnTabVault();
+	UFUNCTION() void OnTabSell();
 
 	struct FShopItem
 	{
@@ -154,6 +225,7 @@ protected:
 		FString Display;
 		int32 Cost = 0;
 		int32 Amount = 0;  // payload for upgrades (e.g. +MaxHP amount)
+		int32 BaseCost = 0; // pre-Fence price; > Cost means "show the slashed original + red price"
 	};
 
 	// Returns true if the player already owns / has queued this item.
@@ -163,7 +235,18 @@ protected:
 	TArray<FShopItem> PermanentCatalogue;  // VAULT section
 	TArray<FShopItem> Displayed;           // slot index -> item, rebuilt each RefreshShop()
 
-	bool bShowingVault = false;            // which section is visible
+	EShopSection CurrentSection = EShopSection::Wares; // which tab page is visible
+
+	// Cost-text color as designed in the widget, captured before the Fence discount ever
+	// paints one red — restored on rows that aren't discounted. Name color likewise, so
+	// rarity tinting on card rows can restore non-card rows.
+	FSlateColor DefaultCostColor;
+	bool bCostColorCached = false;
+	FSlateColor DefaultNameColor;
+	bool bNameColorCached = false;
+
+	// Repaint the WARES/VAULT/SELL tab buttons (active lit, locked vault dimmed, cache hides vault).
+	void RefreshTabVisuals();
 
 	TSubclassOf<UUserWidget> ShopWidgetClass;
 
