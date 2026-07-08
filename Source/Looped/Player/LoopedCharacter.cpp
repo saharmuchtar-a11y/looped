@@ -12,6 +12,7 @@
 #include "Core/LoopedGameInstance.h"
 #include "Core/LoopedInteractable.h"
 #include "Core/LoopedRunGameMode.h"
+#include "UI/LoopedPauseMenuWidget.h"
 #include "Data/PassiveCardData.h"
 #include "Data/EnemyVisualData.h"
 #include "SloMo/SloMoManager.h"
@@ -113,6 +114,13 @@ ALoopedCharacter::ALoopedCharacter()
 	if (SkillActionFinder.Succeeded())
 	{
 		SkillAction = SkillActionFinder.Object;
+	}
+
+	// Esc/P pause menu — same auto-link pattern (mapped to Escape + P in IMC_Default).
+	static ConstructorHelpers::FObjectFinder<UInputAction> PauseActionFinder(TEXT("/Game/IA_Pause"));
+	if (PauseActionFinder.Succeeded())
+	{
+		PauseAction = PauseActionFinder.Object;
 	}
 
 	// Arm-monitor dashboard — a viewport widget created on first open. Auto-link the class.
@@ -519,6 +527,56 @@ void ALoopedCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCom
 	if (SkillAction)
 	{
 		EIC->BindAction(SkillAction, ETriggerEvent::Started, this, &ALoopedCharacter::OnSkillPressed);
+	}
+	if (PauseAction)
+	{
+		EIC->BindAction(PauseAction, ETriggerEvent::Started, this, &ALoopedCharacter::OnPausePressed);
+	}
+}
+
+void ALoopedCharacter::OnPausePressed()
+{
+	TogglePauseMenu();
+}
+
+void ALoopedCharacter::TogglePauseMenu()
+{
+	APlayerController* PC = Cast<APlayerController>(GetController());
+	if (!PC && GetWorld()) PC = GetWorld()->GetFirstPlayerController();
+	if (!PC) return;
+
+	if (!bPauseMenuOpen)
+	{
+		// One menu at a time: the monitor steps aside (it also owns slo-mo, which real pause trumps).
+		if (bHologramOpen)
+		{
+			CloseHologram();
+		}
+		if (!PauseMenuWidget)
+		{
+			// Code-only widget — constructed straight from the C++ class (no WBP asset to cook).
+			PauseMenuWidget = CreateWidget<UUserWidget>(PC, ULoopedPauseMenuWidget::StaticClass());
+		}
+		if (!PauseMenuWidget) return;
+		if (!PauseMenuWidget->IsInViewport())
+		{
+			PauseMenuWidget->AddToViewport(300); // above everything, monitor included
+		}
+		bPauseMenuOpen = true;
+		UGameplayStatics::SetGamePaused(this, true);
+		PC->bShowMouseCursor = true;
+		PC->SetInputMode(FInputModeGameAndUI()); // GameAndUI: IA_Pause (bTriggerWhenPaused) can still close
+	}
+	else
+	{
+		if (PauseMenuWidget && PauseMenuWidget->IsInViewport())
+		{
+			PauseMenuWidget->RemoveFromParent();
+		}
+		bPauseMenuOpen = false;
+		UGameplayStatics::SetGamePaused(this, false);
+		PC->bShowMouseCursor = false;
+		PC->SetInputMode(FInputModeGameOnly());
 	}
 }
 

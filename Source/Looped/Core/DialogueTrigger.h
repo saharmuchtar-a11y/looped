@@ -192,6 +192,14 @@ private:
 	UFUNCTION() void OnFightEnemyDied(class AEnemyBase* Enemy);
 	void OnFightWon();
 
+	// Finishing a talk opens the room's exits — UNLESS the level has enemies placed in it that
+	// weren't spawned by a dialogue fight (a combat event). In that case keep exits locked and
+	// open them only when the last of those dies. No wager reward — this is just the gate, so it
+	// stays separate from the OnFightWon() wager path.
+	void OpenExitsOrGateOnRoomEnemies();
+	UFUNCTION() void OnRoomEnemyDied(class AEnemyBase* Enemy);
+	int32 RoomEnemiesAlive = 0;
+
 	bool bFightPending = false;          // set by ApplyOutcome, consumed by CloseDialogue
 	FName PendingFightRow;               // DT_Enemies row ("Random" allowed — rolls per enemy)
 	int32 PendingFightCount = 0;

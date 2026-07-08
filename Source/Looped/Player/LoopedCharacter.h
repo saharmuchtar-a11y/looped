@@ -402,6 +402,11 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Input")
 	TObjectPtr<UInputAction> SkillAction;
 
+	// Esc/P — pause menu (Resume / Settings / Quit). Loaded in the ctor (IA_Pause has
+	// bTriggerWhenPaused so the same press closes the menu while the game is paused).
+	UPROPERTY(EditDefaultsOnly, Category = "Input")
+	TObjectPtr<UInputAction> PauseAction;
+
 	// --- Q chrono skill (the default skill): world slows, player slows LESS — dodge windows.
 	// Gauge in seconds; drains 1:1 real-time while active, recharges SkillRechargePerSecond.
 	UPROPERTY(EditDefaultsOnly, Category = "LOOPED|Skill")
@@ -470,6 +475,19 @@ private:
 
 	UPROPERTY()
 	TObjectPtr<UUserWidget> SkillGaugeWidget;
+
+	// --- Esc pause menu (WBP_PauseMenu drives Resume/Settings/Quit; buttons call back in) ---
+public:
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Pause")
+	void TogglePauseMenu();
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Pause")
+	bool IsPauseMenuOpen() const { return bPauseMenuOpen; }
+private:
+	void OnPausePressed();
+
+	UPROPERTY()
+	TObjectPtr<UUserWidget> PauseMenuWidget;
+	bool bPauseMenuOpen = false;
 
 	// Middle-Mouse press toggles the arm monitor (State 1, manual analysis — no card draft).
 	void ToggleHologramMenu();

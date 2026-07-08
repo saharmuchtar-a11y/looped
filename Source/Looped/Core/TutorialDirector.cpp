@@ -25,6 +25,10 @@ ATutorialDirector::ATutorialDirector()
 	MsgCombos       = FText::FromString(TEXT("Frequencies resonate. Certain pairs sing together — find the combos."));
 	MsgRelics       = FText::FromString(TEXT("Relics wait in the deep rooms. Artifacts outlive the loop itself."));
 	MsgPortal       = FText::FromString(TEXT("The way out is open."));
+
+	MsgMoveDone     = FText::FromString(TEXT("Good. Your body remembers how to move."));
+	MsgChronoDone   = FText::FromString(TEXT("Yes — time bends for you. Hold that feeling."));
+	MsgCombatDone   = FText::FromString(TEXT("The void is quiet again. Well fought."));
 }
 
 void ATutorialDirector::BeginPlay()
@@ -54,6 +58,9 @@ void ATutorialDirector::Tick(float DeltaSeconds)
 	ALoopedCharacter* Player = GetPlayerChar();
 	if (!Player) return;
 
+	// During a confirm beat the stage is settled — hold the screen and wait for the timer.
+	if (bStageCompleting) return;
+
 	// Transient center messages fade — re-show the current instruction until its stage lands.
 	const double Now = FPlatformTime::Seconds();
 	if (!CurrentPrompt.IsEmpty() && Now - LastPromptTime > RepromptSeconds)
@@ -61,6 +68,9 @@ void ATutorialDirector::Tick(float DeltaSeconds)
 		LastPromptTime = Now;
 		Say(CurrentPrompt, 4.0f);
 	}
+
+	// A teach beat can't be *completed* until its instruction has been up long enough to read.
+	const bool bStageReady = (Now - StageEnterTime) >= MinStageSeconds;
 
 	switch (Stage)
 	{
@@ -76,24 +86,24 @@ void ATutorialDirector::Tick(float DeltaSeconds)
 		bHavePlayerPos = true;
 		if (Player->JumpCurrentCount > 0) { bJumpSeen = true; }
 
-		if (DistanceMoved >= MoveDistanceRequired && bJumpSeen)
+		if (bStageReady && DistanceMoved >= MoveDistanceRequired && bJumpSeen)
 		{
-			EnterStage(ETutorialStage::Chrono);
+			CompleteStage(ETutorialStage::Chrono, MsgMoveDone);
 		}
 		break;
 	}
 
 	case ETutorialStage::Chrono:
-		if (Player->IsChronoSkillActive())
+		if (bStageReady && Player->IsChronoSkillActive())
 		{
-			EnterStage(ETutorialStage::Combat);
+			CompleteStage(ETutorialStage::Combat, MsgChronoDone);
 		}
 		break;
 
 	case ETutorialStage::Combat:
 		if (AllWaveEnemiesDead())
 		{
-			EnterStage(ETutorialStage::Freed);
+			CompleteStage(ETutorialStage::Freed, MsgCombatDone);
 		}
 		break;
 
@@ -137,9 +147,33 @@ void ATutorialDirector::Tick(float DeltaSeconds)
 	}
 }
 
+void ATutorialDirector::CompleteStage(ETutorialStage Next, const FText& Confirm)
+{
+	if (bStageCompleting) return; // one latch per stage
+	bStageCompleting = true;
+
+	// Stop reprompting the instruction; play the confirmation, then advance after the beat.
+	CurrentPrompt = FText::GetEmpty();
+	if (!Confirm.IsEmpty())
+	{
+		Say(Confirm, ConfirmBeatSeconds + 0.5f);
+	}
+
+	TWeakObjectPtr<ATutorialDirector> WeakThis(this);
+	GetWorldTimerManager().SetTimer(StageAdvanceHandle, FTimerDelegate::CreateLambda([WeakThis, Next]()
+	{
+		if (WeakThis.IsValid())
+		{
+			WeakThis->EnterStage(Next);
+		}
+	}), FMath::Max(0.1f, ConfirmBeatSeconds), false);
+}
+
 void ATutorialDirector::EnterStage(ETutorialStage NewStage)
 {
 	Stage = NewStage;
+	bStageCompleting = false;
+	StageEnterTime = FPlatformTime::Seconds();
 	UE_LOG(LogLoopedRun, Display, TEXT("[Tutorial] Stage -> %d"), static_cast<int32>(NewStage));
 
 	switch (NewStage)
@@ -163,10 +197,10 @@ void ATutorialDirector::EnterStage(ETutorialStage NewStage)
 		break;
 
 	case ETutorialStage::Monitor:
-		// The monitor is on the arm — from this moment the Sphere is the way out (Sahar:
-		// exit available "from the moment i take the monitor"). The exit portal is the
-		// invisible trigger hugging the sphere, hub-style; its label lights up now.
-		if (ExitPortal) { ExitPortal->ActivatePortal(); }
+		// The exit stays LOCKED on a first run until the whole tutorial finishes (Sahar 2026-07-09:
+		// opening it here let you wander off / bail by accidentally talking to Orin again). It opens
+		// at Done (FinishTutorial). Replays already stand open from BeginPlay, so a returning player
+		// who taps E by mistake can still leave immediately — that path is untouched.
 		SetPrompt(MsgMonitor);
 		break;
 

@@ -22,3 +22,4 @@ Build/
 
 # Raw downloaded asset sources (re-downloadable, see memory: project-looped-free-assets)
 RawAssets/
+Packaged/

@@ -67,7 +67,7 @@ void ALoopedLever::Interact(ALoopedCharacter* Player)
 		Player->ShowCenterMessage(PulledMessage, 3.5f);
 	}
 	UE_LOG(LogLoopedRun, Display, TEXT("[Lever] %s -> %s (%d gates, %d hazards, %d platforms)"),
-		*GetActorLabel(), bPulled ? TEXT("PULLED") : TEXT("RESET"),
+		*GetName(), bPulled ? TEXT("PULLED") : TEXT("RESET"),
 		LinkedGates.Num(), LinkedHazards.Num(), LinkedPlatforms.Num());
 }
 

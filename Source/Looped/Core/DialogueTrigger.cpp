@@ -15,6 +15,8 @@
 #include "Core/LoopedGameInstance.h"
 #include "Player/LoopedCharacter.h"
 #include "Enemies/EnemyBase.h"
+#include "Enemies/BossBase.h"
+#include "EngineUtils.h"
 #include "Data/EnemyData.h"
 #include "Data/ArtifactData.h"
 #include "Looped.h"
@@ -875,10 +877,46 @@ void ADialogueTrigger::CloseDialogue()
 		GetWorldTimerManager().SetTimer(FightSpawnTimer, this, &ADialogueTrigger::SpawnFight, 0.7f, false);
 		return;
 	}
+	OpenExitsOrGateOnRoomEnemies();
+}
+
+void ADialogueTrigger::OpenExitsOrGateOnRoomEnemies()
+{
+	// Count enemies already living in the level (placed by the designer, not by a dialogue fight).
+	// Bosses run their own exit flow (BossRoomExit) — never gate on them here.
+	int32 Alive = 0;
+	for (TActorIterator<AEnemyBase> It(GetWorld()); It; ++It)
+	{
+		AEnemyBase* E = *It;
+		if (!E || E->IsA(ABossBase::StaticClass())) continue;
+		if (!E->IsAlive()) continue;
+		E->OnEnemyDied.AddUniqueDynamic(this, &ADialogueTrigger::OnRoomEnemyDied);
+		++Alive;
+	}
+
+	if (Alive > 0)
+	{
+		// Combat event: hold the exits. OnRoomEnemyDied opens them when the room is clear.
+		RoomEnemiesAlive = Alive;
+		UE_LOG(LogLoopedRun, Display, TEXT("[Dialogue] Talk ended with %d enemies alive — exits locked until cleared."), Alive);
+		return;
+	}
+
+	// No living enemies (peaceful event / shop / casino) — open exits as before.
 	if (ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
 	{
 		GI->ActivateRoomExitPortals();
 	}
+}
+
+void ADialogueTrigger::OnRoomEnemyDied(AEnemyBase* /*Enemy*/)
+{
+	if (--RoomEnemiesAlive > 0) return;
+	if (ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
+	{
+		GI->ActivateRoomExitPortals();
+	}
+	UE_LOG(LogLoopedRun, Display, TEXT("[Dialogue] Room cleared after talk — exits open."));
 }
 
 void ADialogueTrigger::SpawnFight()

@@ -64,12 +64,28 @@ public:
 	FName MonitorArtifact = TEXT("Orin");
 
 	// 2D distance (uu) the player must cover in the movement stage (plus one jump).
+	// Raised from 800 -> 1600 so movement is a real traverse, not two steps (Sahar: "too fast").
 	UPROPERTY(EditAnywhere, Category = "Tutorial")
-	float MoveDistanceRequired = 800.0f;
+	float MoveDistanceRequired = 1600.0f;
 
 	// Current instruction re-shows this often until its stage completes (center messages are transient).
 	UPROPERTY(EditAnywhere, Category = "Tutorial")
 	float RepromptSeconds = 9.0f;
+
+	// --- Pacing (Sahar: "make it more linear"). A stage can't be *completed* until its
+	// instruction has been on screen this long — stops the player blitzing past a teach beat.
+	UPROPERTY(EditAnywhere, Category = "Tutorial|Pacing")
+	float MinStageSeconds = 3.0f;
+
+	// After the player satisfies a stage, a short "well done" beat plays before the next
+	// instruction — the flow reads as deliberate steps, not an instant chain.
+	UPROPERTY(EditAnywhere, Category = "Tutorial|Pacing")
+	float ConfirmBeatSeconds = 2.0f;
+
+	// Confirmation lines shown during the beat between action stages.
+	UPROPERTY(EditAnywhere, Category = "Tutorial|Text", meta = (MultiLine = true)) FText MsgMoveDone;
+	UPROPERTY(EditAnywhere, Category = "Tutorial|Text", meta = (MultiLine = true)) FText MsgChronoDone;
+	UPROPERTY(EditAnywhere, Category = "Tutorial|Text", meta = (MultiLine = true)) FText MsgCombatDone;
 
 	// --- Instruction lines (per-instance tunable; Orin's actual voice lives in DT_Dialogue) ---
 	UPROPERTY(EditAnywhere, Category = "Tutorial|Text", meta = (MultiLine = true)) FText MsgMovement;
@@ -90,6 +106,8 @@ protected:
 
 private:
 	void EnterStage(ETutorialStage NewStage);
+	// Latch a stage as satisfied: plays a confirm beat, then advances to Next after ConfirmBeatSeconds.
+	void CompleteStage(ETutorialStage Next, const FText& Confirm);
 	void SetPrompt(const FText& Text);
 	void Say(const FText& Text, float Duration) const;
 	void SpawnCombatWave();
@@ -110,6 +128,11 @@ private:
 	// Reprompt bookkeeping.
 	FText CurrentPrompt;
 	double LastPromptTime = -100.0;
+
+	// Pacing bookkeeping.
+	double StageEnterTime = 0.0;      // when the current stage began (for MinStageSeconds gate)
+	bool bStageCompleting = false;    // true during the confirm beat — freezes further advancing
+	FTimerHandle StageAdvanceHandle;  // fires EnterStage(Next) after the beat
 
 	// Cards-stage bookkeeping: the draft opens the hologram; the pick closes it.
 	bool bDraftOpenSeen = false;

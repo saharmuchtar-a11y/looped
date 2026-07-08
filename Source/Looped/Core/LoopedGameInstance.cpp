@@ -5,6 +5,10 @@
 #include "Player/LoopedCharacter.h"
 #include "Core/PortalActor.h"
 #include "EngineUtils.h"
+#include "InputMappingContext.h"
+#include "InputAction.h"
+#include "HAL/IConsoleManager.h"
+#include "Misc/ConfigCacheIni.h"
 
 static FName CanonCardId(FName Id); // defined below — folds "VenomStrike" alias onto "Venom"
 
@@ -52,6 +56,52 @@ void ULoopedGameInstance::Init()
 #if !UE_BUILD_SHIPPING
 	// [GameInstance] INIT on-screen message removed for a clean screen (UE_LOG above kept for dev).
 #endif
+
+	// Re-apply the persisted motion-blur choice (the cvar resets every launch).
+	SetMotionBlurEnabled(IsMotionBlurEnabled());
+}
+
+void ULoopedGameInstance::SetMotionBlurEnabled(bool bEnabled)
+{
+	if (IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.MotionBlurQuality")))
+	{
+		CVar->Set(bEnabled ? 4 : 0, ECVF_SetByGameSetting);
+	}
+	GConfig->SetBool(TEXT("LoopedSettings"), TEXT("bMotionBlur"), bEnabled, GGameUserSettingsIni);
+	GConfig->Flush(false, GGameUserSettingsIni);
+	UE_LOG(LogLoopedCore, Display, TEXT("[Settings] Motion blur -> %s"), bEnabled ? TEXT("ON") : TEXT("OFF"));
+}
+
+bool ULoopedGameInstance::IsMotionBlurEnabled() const
+{
+	bool bEnabled = true; // engine default
+	GConfig->GetBool(TEXT("LoopedSettings"), TEXT("bMotionBlur"), bEnabled, GGameUserSettingsIni);
+	return bEnabled;
+}
+
+TArray<FText> ULoopedGameInstance::GetKeyBindLines() const
+{
+	// Read the live mappings so this panel can never drift from IMC_Default. Keys for the
+	// same action collapse onto one line (Move -> W/A/S/D).
+	TArray<FText> Out;
+	const UInputMappingContext* IMC = LoadObject<UInputMappingContext>(nullptr, TEXT("/Game/IMC_Default.IMC_Default"));
+	if (!IMC) return Out;
+
+	TArray<FString> Order;                 // first-seen action order (the IMC reads top-down)
+	TMap<FString, TArray<FString>> Keys;   // action display name -> key names
+	for (const FEnhancedActionKeyMapping& M : IMC->GetMappings())
+	{
+		if (!M.Action) continue;
+		FString Name = M.Action->GetName();
+		Name.RemoveFromStart(TEXT("IA_"));
+		if (!Keys.Contains(Name)) { Order.Add(Name); }
+		Keys.FindOrAdd(Name).Add(M.Key.GetDisplayName(false).ToString());
+	}
+	for (const FString& Name : Order)
+	{
+		Out.Add(FText::FromString(FString::Printf(TEXT("%s  -  %s"), *Name, *FString::Join(Keys[Name], TEXT(" / ")))));
+	}
+	return Out;
 }
 
 void ULoopedGameInstance::Shutdown()
@@ -941,6 +991,15 @@ void ULoopedGameInstance::EvaluateUnlocksAfterStatChange()
 	TryUnlock(TEXT("Echo"),       Stats->TotalEnemyKills >= 150);                // a hunter's rhythm
 	// (ChainSpark retired 2026-07-03 — Echo owns the "hits do more" slot. The BossKills>=5
 	// milestone is free for a future unlock; ApplyChainSparkEffect stays: Capacitor reuses it.)
+
+	// Floors-arc batch (gated 2026-07-09 — shipped ungated and leaked into first-run offers;
+	// only BurnShot/Venom/Deadeye are from-start, Sahar's call). Ladder approved by Sahar.
+	TryUnlock(TEXT("Momentum"),    Stats->RoomClears >= 15);
+	TryUnlock(TEXT("Rupture"),     Stats->TotalEnemyKills >= 50);
+	TryUnlock(TEXT("HuntersMark"), Stats->BossKills >= 2);
+	TryUnlock(TEXT("Overcharge"),  Stats->RoomClears >= 25);
+	TryUnlock(TEXT("Executioner"), Stats->TotalEnemyKills >= 300);
+	TryUnlock(TEXT("GlassCannon"), Stats->BossKills >= 3);
 
 	// Epic cards.
 	// Speed is unlocked ONLY by a fast run (see AddRunCompleted / FastRunUnlockSeconds) — Sahar's call.

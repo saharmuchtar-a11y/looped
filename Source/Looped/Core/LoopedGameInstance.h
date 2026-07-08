@@ -434,6 +434,19 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|Stats")
 	void DumpStatsToScreen();
 
+	// --- Player settings (pause menu -> Settings page) ---
+	// Motion blur on/off; applies immediately (r.MotionBlurQuality) and persists in
+	// GameUserSettings.ini (per-machine, not per-save — a friend's copy keeps their choice).
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Settings")
+	void SetMotionBlurEnabled(bool bEnabled);
+
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Settings")
+	bool IsMotionBlurEnabled() const;
+
+	// "Action — Key(s)" lines read live from IMC_Default, for the Settings key-binds panel.
+	UFUNCTION(BlueprintPure, Category = "LOOPED|Settings")
+	TArray<FText> GetKeyBindLines() const;
+
 	// --- Death screen persistence across level change ---
 	// The death screen needs to survive OpenLevel("L_Hub") — widgets die with their world,
 	// so we track active state on the GameInstance (lives across levels) and re-create the

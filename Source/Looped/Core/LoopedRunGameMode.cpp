@@ -693,7 +693,6 @@ void ALoopedRunGameMode::SpawnHubPortal(FName Destination)
 		if (Portal)
 		{
 			Portal->TargetLevelName = Destination;
-			Portal->SetActorLabel(TEXT("RunPortal"));
 			UE_LOG(LogLoopedRun, Display, TEXT("Portal spawned → %s"), *Destination.ToString());
 		}
 	}
@@ -714,7 +713,6 @@ void ALoopedRunGameMode::SpawnDescentPortal(FName Destination)
 		{
 			Portal->TargetLevelName = Destination;
 			Portal->PortalLabel = FText::FromString(TEXT("DESCEND"));
-			Portal->SetActorLabel(TEXT("DescentPortal"));
 			// BeginPlay already ran during SpawnActor (before the label was set) — re-enable so
 			// the label paints. ActivatePortal is safe to call repeatedly.
 			Portal->ActivatePortal();
