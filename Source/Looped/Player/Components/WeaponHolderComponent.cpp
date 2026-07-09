@@ -425,12 +425,20 @@ void UWeaponHolderComponent::PerformMeleeAttack()
 	Params.AddIgnoredActor(Owner);
 
 	bool bConnected = false;
+	TSet<const AActor*> ProcessedActors;
 	if (GetWorld()->SweepMultiByChannel(Hits, Start, End, FQuat::Identity, ECC_Pawn, Shape, Params))
 	{
 		for (const FHitResult& Hit : Hits)
 		{
 			AActor* HitActor = Hit.GetActor();
 			if (!HitActor || HitActor == Owner) continue;
+
+			// SweepMulti reports one hit PER COMPONENT — an enemy's capsule + visual mesh both
+			// respond, so the same enemy landed 2-3 hit results per swing and silently took
+			// double/triple damage (+ card procs + stacked hurt sounds). Pay each actor ONCE.
+			bool bAlreadyProcessed = false;
+			ProcessedActors.Add(HitActor, &bAlreadyProcessed);
+			if (bAlreadyProcessed) continue;
 
 			OnWeaponHit.Broadcast(Hit);
 
