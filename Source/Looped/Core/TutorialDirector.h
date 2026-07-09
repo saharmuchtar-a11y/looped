@@ -8,15 +8,20 @@ class ACompanionCage;
 class APortalActor;
 class AEnemyBase;
 class ALoopedCharacter;
+class AGateActor;
+class ALoopedLever;
+class ADialogueTrigger;
+class AActor;
 
-// The stages of the first-launch tutorial, in teach order (see looped_rescue_system.md):
-// move -> chrono (Q) -> combat -> free Orin -> his dialogue grants the Arm Monitor ->
-// middle-click teach -> missions/hints beat -> card draft (deck building) -> combos +
-// relics lore -> portal home.
+// The stages of the first-launch tutorial, in teach order (Structure A — linear corridor):
+// move+jump -> ride hazard platform -> pull lever -> chrono (Q) -> combat -> free Orin ->
+// monitor open/close -> card draft -> portal home.
 UENUM()
 enum class ETutorialStage : uint8
 {
 	Movement,
+	Hazard,       // ride the moving platform across the lava (reach HazardGoal)
+	Lever,        // pull the training lever (opens Gate_ToArena)
 	Chrono,
 	Combat,
 	Freed,        // cage open — waiting for the dialogue grant (HasArtifact(MonitorArtifact))
@@ -27,9 +32,8 @@ enum class ETutorialStage : uint8
 };
 
 // Scripted brain of L_Tutorial. Placed once in the level; walks the player through the
-// teaching stages with reprompted center messages, spawns the combat wave, opens Orin's
-// cage, and only reveals the exit portal after the full flow. The cage is set to puzzle
-// mode (bOpenWhenEnemiesDead=false, bRevealPortalsOnOpen=false) — the director owns both.
+// teaching stages with reprompted center messages, opens corridor gates, spawns the combat
+// wave, unlocks Orin's talk, and only reveals the exit portal after the full flow.
 UCLASS(Blueprintable)
 class LOOPED_API ATutorialDirector : public AActor
 {
@@ -42,9 +46,42 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Tutorial")
 	TObjectPtr<ACompanionCage> Cage;
 
+	// Orin's dialogue — locked until Freed so early E can't scramble the teach order.
+	UPROPERTY(EditAnywhere, Category = "Tutorial")
+	TObjectPtr<ADialogueTrigger> OrinDialogue;
+
 	// The way home. Starts disabled; activated at Done. Null = activate every portal (cage-style fallback).
 	UPROPERTY(EditAnywhere, Category = "Tutorial")
 	TObjectPtr<APortalActor> ExitPortal;
+
+	// --- Corridor gates (closed at start; director Opens them as stages clear) ---
+	// Opens when Movement completes → reveals the hazard crossing.
+	UPROPERTY(EditAnywhere, Category = "Tutorial|Gates")
+	TObjectPtr<AGateActor> GateAfterMove;
+
+	// Opens when Hazard completes → reveals the lever alcove.
+	UPROPERTY(EditAnywhere, Category = "Tutorial|Gates")
+	TObjectPtr<AGateActor> GateAfterHazard;
+
+	// Opens when Lever completes (also linked from the training lever) → reveals the arena.
+	UPROPERTY(EditAnywhere, Category = "Tutorial|Gates")
+	TObjectPtr<AGateActor> GateToArena;
+
+	// Training lever — stage clears on HasBeenPulled().
+	UPROPERTY(EditAnywhere, Category = "Tutorial|Gates")
+	TObjectPtr<ALoopedLever> TrainingLever;
+
+	// Invisible/visible marker past the lava — player must get within HazardGoalRadius (uu).
+	UPROPERTY(EditAnywhere, Category = "Tutorial|Gates")
+	TObjectPtr<AActor> HazardGoal;
+
+	UPROPERTY(EditAnywhere, Category = "Tutorial|Gates")
+	float HazardGoalRadius = 350.0f;
+
+	// Also clear Hazard when the player's Y is at or south of this (world Y, corridor faces -Y).
+	// Backup if the goal marker is missed while riding — default sits past the lava strip.
+	UPROPERTY(EditAnywhere, Category = "Tutorial|Gates")
+	float HazardClearY = -650.0f;
 
 	// Combat-wave enemies, spawned at the Combat stage (NOT pre-placed: they'd aggro during
 	// the movement teach, and an empty level would trip the cage's no-enemies failsafe).
@@ -64,9 +101,8 @@ public:
 	FName MonitorArtifact = TEXT("Orin");
 
 	// 2D distance (uu) the player must cover in the movement stage (plus one jump).
-	// Raised from 800 -> 1600 so movement is a real traverse, not two steps (Sahar: "too fast").
 	UPROPERTY(EditAnywhere, Category = "Tutorial")
-	float MoveDistanceRequired = 1600.0f;
+	float MoveDistanceRequired = 900.0f;
 
 	// Current instruction re-shows this often until its stage completes (center messages are transient).
 	UPROPERTY(EditAnywhere, Category = "Tutorial")
@@ -84,11 +120,15 @@ public:
 
 	// Confirmation lines shown during the beat between action stages.
 	UPROPERTY(EditAnywhere, Category = "Tutorial|Text", meta = (MultiLine = true)) FText MsgMoveDone;
+	UPROPERTY(EditAnywhere, Category = "Tutorial|Text", meta = (MultiLine = true)) FText MsgHazardDone;
+	UPROPERTY(EditAnywhere, Category = "Tutorial|Text", meta = (MultiLine = true)) FText MsgLeverDone;
 	UPROPERTY(EditAnywhere, Category = "Tutorial|Text", meta = (MultiLine = true)) FText MsgChronoDone;
 	UPROPERTY(EditAnywhere, Category = "Tutorial|Text", meta = (MultiLine = true)) FText MsgCombatDone;
 
 	// --- Instruction lines (per-instance tunable; Orin's actual voice lives in DT_Dialogue) ---
 	UPROPERTY(EditAnywhere, Category = "Tutorial|Text", meta = (MultiLine = true)) FText MsgMovement;
+	UPROPERTY(EditAnywhere, Category = "Tutorial|Text", meta = (MultiLine = true)) FText MsgHazard;
+	UPROPERTY(EditAnywhere, Category = "Tutorial|Text", meta = (MultiLine = true)) FText MsgLever;
 	UPROPERTY(EditAnywhere, Category = "Tutorial|Text", meta = (MultiLine = true)) FText MsgChrono;
 	UPROPERTY(EditAnywhere, Category = "Tutorial|Text", meta = (MultiLine = true)) FText MsgCombat;
 	UPROPERTY(EditAnywhere, Category = "Tutorial|Text", meta = (MultiLine = true)) FText MsgFreed;
@@ -114,6 +154,8 @@ private:
 	bool AllWaveEnemiesDead() const;
 	void FireCardDraft();
 	void FinishTutorial();
+	void OpenGate(AGateActor* Gate) const;
+	void LockOrinDialogue(bool bLocked) const;
 
 	ALoopedCharacter* GetPlayerChar() const;
 

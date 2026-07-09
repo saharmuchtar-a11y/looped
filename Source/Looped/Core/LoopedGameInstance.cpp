@@ -516,6 +516,12 @@ void ULoopedGameInstance::GrantArtifactCheat(FName ArtifactName)
 	GrantArtifact(ArtifactName);
 }
 
+void ULoopedGameInstance::GrantRunArtifactCheat(FName ArtifactName)
+{
+	UE_LOG(LogLoopedCore, Display, TEXT("[Artifacts] Cheat run-blessing grant: %s"), *ArtifactName.ToString());
+	GrantRunArtifact(ArtifactName);
+}
+
 int32 ULoopedGameInstance::GetEchoes() const
 {
 	return Stats ? Stats->Echoes : 0;

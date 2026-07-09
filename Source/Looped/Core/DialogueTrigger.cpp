@@ -150,6 +150,7 @@ void ADialogueTrigger::OnOverlap(UPrimitiveComponent* OverlappedComp, AActor* Ot
 void ADialogueTrigger::Interact(ALoopedCharacter* Player)
 {
 	// Same guards the old walk-in start used.
+	if (!bInteractionEnabled) return;
 	if (bOpen) return;
 	if (bOncePerLoad && bFired) return;
 
@@ -159,6 +160,16 @@ void ADialogueTrigger::Interact(ALoopedCharacter* Player)
 		return;
 	}
 	StartDialogue(RootNode);
+}
+
+void ADialogueTrigger::SetInteractionEnabled(bool bEnabled)
+{
+	bInteractionEnabled = bEnabled;
+	// Hide the marker while locked so Orin doesn't look talkable mid-combat.
+	if (!bOpen)
+	{
+		SetMarkerVisible(bEnabled);
+	}
 }
 
 void ADialogueTrigger::StartDialogue(FName NodeId)

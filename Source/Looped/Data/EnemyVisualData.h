@@ -48,4 +48,21 @@ struct FEnemyVisualSet : public FTableRowBase
 	// Extra mesh-only scale. Bosses usually keep 1.0 — their DT_Enemies row already scales the ACTOR.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Visual")
 	float MeshScale = 1.0f;
+
+	// Floater kit (F3 ranged / Hexweaver): no walk/run locomotion, mesh raised + bobbed,
+	// and EnemyBase grants bCanFloatOverHazards so they alone may path over lava/venom.
+	// NOTE: DT row names are floor roles — F3_Ranged uses floor2ranged Hexweaver assets (and
+	// F2_Ranged uses rangedfloor3 Gearbound). Folder names do NOT match the floor role.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Visual|Float")
+	bool bFloats = false;
+
+	// Added on top of MeshRelLocation.Z so the mesh clearly hovers above the capsule/floor.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Visual|Float", meta = (EditCondition = "bFloats"))
+	float FloatHoverBoostZ = 55.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Visual|Float", meta = (EditCondition = "bFloats"))
+	float FloatBobAmplitude = 8.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Visual|Float", meta = (EditCondition = "bFloats"))
+	float FloatBobSpeed = 1.8f;
 };

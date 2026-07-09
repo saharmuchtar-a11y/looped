@@ -31,7 +31,8 @@ public:
 	virtual float GetInteractRange() const override { return TriggerRadius + 60.0f; }
 	virtual FText GetInteractPrompt() const override
 	{
-		return (bOpen || (bOncePerLoad && bFired)) ? FText::GetEmpty() : FText::FromString(TEXT("investigate"));
+		if (!bInteractionEnabled || bOpen || (bOncePerLoad && bFired)) return FText::GetEmpty();
+		return FText::FromString(TEXT("investigate"));
 	}
 
 	// Dialogue source table (rows of FDialogueNode) and the node to open on.
@@ -109,6 +110,14 @@ public:
 	// Fire only once per level load (typical for a one-shot event room).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Dialogue")
 	bool bOncePerLoad = true;
+
+	// When false, Interact is a no-op and the proximity prompt hides — used by the tutorial
+	// director to lock Orin until the Freed stage (stops early grant / scrambled teach order).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Dialogue")
+	bool bInteractionEnabled = true;
+
+	UFUNCTION(BlueprintCallable, Category = "Dialogue")
+	void SetInteractionEnabled(bool bEnabled);
 
 	// Open the dialogue at a specific node (also callable from BP / other triggers).
 	UFUNCTION(BlueprintCallable, Category = "Dialogue")

@@ -37,6 +37,12 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/SkeletalMesh.h"
 #include "Animation/AnimSequence.h"
+#include "Components/CapsuleComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/SkeletalMesh.h"
+#include "Animation/AnimSequence.h"
+#include "PhysicsEngine/PhysicsAsset.h"
 #include "Animation/AnimInstance.h"
 #include "Kismet/GameplayStatics.h"
 #include "Sound/SoundBase.h"
@@ -71,6 +77,10 @@ ALoopedCharacter::ALoopedCharacter()
 	static ConstructorHelpers::FObjectFinder<USoundBase> JumpSnd(TEXT("/Game/Audio/jump.jump"));
 	if (JumpSnd.Succeeded()) JumpSound = JumpSnd.Object;
 
+	// Same asset PortalActor uses for room travel — Lysa Second Wind cue (Sahar 2026-07-09).
+	static ConstructorHelpers::FObjectFinder<USoundBase> PortalSnd(TEXT("/Game/Audio/portal.portal"));
+	if (PortalSnd.Succeeded()) PortalTravelSound = PortalSnd.Object;
+
 	// Death screen widget class — loaded from WBP_DeathScreen via path.
 	static ConstructorHelpers::FClassFinder<UUserWidget> DeathScreenClassFinder(TEXT("/Game/UI/WBP_DeathScreen"));
 	if (DeathScreenClassFinder.Succeeded())
@@ -78,13 +88,19 @@ ALoopedCharacter::ALoopedCharacter()
 		DeathScreenClass = DeathScreenClassFinder.Class;
 	}
 
-	// Held-weapon mesh, attached to the hero hand socket. Starts empty/hidden — the WeaponHolder
-	// drives which mesh shows from the equipped FWeaponData (data-driven; no baked-in component).
+	// Held-weapon mesh. In classic mode it attaches to the hand socket; in POV stick mode
+	// BeginPlay reparents it to the FP camera (Manny body stays hidden).
 	WeaponMeshComp = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("WeaponMesh"));
 	WeaponMeshComp->SetupAttachment(GetMesh(), WeaponAttachSocket);
 	WeaponMeshComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	WeaponMeshComp->SetVisibility(false);
 	WeaponMeshComp->SetCastShadow(false);
+
+	// Soft refs for the Meshy Dead package (death cam only). Soft so cook stays light if unused.
+	DeathBodyMesh = TSoftObjectPtr<USkeletalMesh>(FSoftObjectPath(TEXT(
+		"/Game/new_assets/heronew/Meshy_AI_Wasteland_Wanderer_biped_Animation_Dead_withSkin/SkeletalMeshes/Meshy_AI_Wasteland_Wanderer_biped_Animation_Dead_withSkin.Meshy_AI_Wasteland_Wanderer_biped_Animation_Dead_withSkin")));
+	DeathBodyAnim = TSoftObjectPtr<UAnimSequence>(FSoftObjectPath(TEXT(
+		"/Game/new_assets/heronew/Meshy_AI_Wasteland_Wanderer_biped_Animation_Dead_withSkin/SkeletalMeshes/Meshy_AI_Wasteland_Wanderer_biped_Animation_Dead_withSkin_Anim.Meshy_AI_Wasteland_Wanderer_biped_Animation_Dead_withSkin_Anim")));
 
 	// Pre-load Manny unarmed attack anims so PlayRandomAttackAnim has something to pick from.
 	static ConstructorHelpers::FObjectFinder<UAnimSequence> Atk1(TEXT("/Game/Characters/Mannequins/Anims/Unarmed/Attack/MM_Attack_01"));
@@ -140,6 +156,11 @@ ALoopedCharacter::ALoopedCharacter()
 
 void ALoopedCharacter::PlayRandomAttackAnim()
 {
+	if (bPOVStickMode)
+	{
+		StartPOVStickSwing();
+		return;
+	}
 	if (AttackAnims.Num() == 0 || !GetMesh()) return;
 	UAnimInstance* AnimInst = GetMesh()->GetAnimInstance();
 	if (!AnimInst) return;
@@ -147,6 +168,146 @@ void ALoopedCharacter::PlayRandomAttackAnim()
 	if (UAnimSequence* Seq = AttackAnims[Pick])
 	{
 		AnimInst->PlaySlotAnimationAsDynamicMontage(Seq, FName(TEXT("DefaultSlot")), 0.1f, 0.1f, 1.0f);
+	}
+}
+
+void ALoopedCharacter::SetupPOVStickMode()
+{
+	if (!bPOVStickMode) return;
+
+	// Alive POV: no body — Branch lives on the camera.
+	if (USkeletalMeshComponent* Body = GetMesh())
+	{
+		Body->SetOwnerNoSee(true);
+		Body->SetVisibility(false, true);
+		Body->bCastHiddenShadow = false;
+	}
+
+	if (WeaponMeshComp && FirstPersonCamera)
+	{
+		WeaponMeshComp->AttachToComponent(FirstPersonCamera, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+		WeaponMeshComp->SetRelativeLocation(POVStickIdleLoc);
+		WeaponMeshComp->SetRelativeRotation(POVStickIdleRot);
+		WeaponMeshComp->SetRelativeScale3D(POVStickIdleScale);
+		WeaponMeshComp->SetCastShadow(false);
+		// Mesh is applied by WeaponHolder::EquipWeapon → SetWeaponVisualMesh.
+		if (WeaponMeshComp->GetStaticMesh())
+		{
+			WeaponMeshComp->SetVisibility(true);
+		}
+	}
+
+	BreathPhase = 0.0f;
+	POVSwingElapsed = -1.0f;
+	UE_LOG(LogLoopedCore, Display, TEXT("[POV] stick mode ON — body hidden, Branch on camera."));
+}
+
+void ALoopedCharacter::StartPOVStickSwing()
+{
+	if (!bPOVStickMode || !WeaponMeshComp) return;
+	POVSwingElapsed = 0.0f;
+}
+
+void ALoopedCharacter::ApplyPOVStickPose(float SwingAlpha01, float InBreathPhase)
+{
+	if (!WeaponMeshComp || !bPOVStickMode) return;
+
+	const float BreathZ = FMath::Sin(InBreathPhase) * BreathBobAmplitude;
+	FVector Loc = POVStickIdleLoc + FVector(0.0f, 0.0f, BreathZ);
+	FRotator Rot = POVStickIdleRot;
+
+	if (SwingAlpha01 > KINDA_SMALL_NUMBER)
+	{
+		// 0→1→0 bell: ease out to peak at mid-swing, ease back to idle.
+		const float Bell = FMath::Sin(SwingAlpha01 * PI);
+		Rot = FMath::Lerp(POVStickIdleRot, POVSwingPeakRot, Bell);
+		Loc += FVector(6.0f, -4.0f, 2.0f) * Bell; // push slightly into view on the slash
+	}
+
+	WeaponMeshComp->SetRelativeLocation(Loc);
+	WeaponMeshComp->SetRelativeRotation(Rot);
+	WeaponMeshComp->SetRelativeScale3D(POVStickIdleScale);
+}
+
+void ALoopedCharacter::UpdatePOVStick(float DeltaSeconds)
+{
+	if (!bPOVStickMode || !WeaponMeshComp || bInDeathCam) return;
+
+	BreathPhase += DeltaSeconds * BreathBobSpeed * 2.0f * PI;
+
+	float SwingA = 0.0f;
+	if (POVSwingElapsed >= 0.0f)
+	{
+		POVSwingElapsed += DeltaSeconds;
+		const float Dur = FMath::Max(0.05f, POVSwingDuration);
+		SwingA = FMath::Clamp(POVSwingElapsed / Dur, 0.0f, 1.0f);
+		if (POVSwingElapsed >= Dur)
+		{
+			POVSwingElapsed = -1.0f;
+			SwingA = 0.0f;
+		}
+	}
+
+	ApplyPOVStickPose(SwingA, BreathPhase);
+}
+
+void ALoopedCharacter::BeginPOVDeathBody()
+{
+	// Hide the FP stick — death cam shows the Meshy corpse instead.
+	if (WeaponMeshComp)
+	{
+		WeaponMeshComp->SetVisibility(false);
+	}
+
+	USkeletalMesh* DeadMesh = DeathBodyMesh.LoadSynchronous();
+	UAnimSequence* DeadAnim = DeathBodyAnim.LoadSynchronous();
+	USkeletalMeshComponent* Body = GetMesh();
+	if (!Body || !DeadMesh)
+	{
+		UE_LOG(LogLoopedCore, Warning, TEXT("[POV] Death body missing — falling back to current mesh ragdoll."));
+		return;
+	}
+
+	Body->SetAnimInstanceClass(nullptr);
+	Body->SetSkeletalMesh(DeadMesh);
+	Body->SetRelativeScale3D(FVector(DeathBodyScale));
+	// Capsule-centered: Meshy Dead bounds are ~1.6uu; after ×111 the feet sit near z=0 of the mesh.
+	Body->SetRelativeLocation(FVector(0.0f, 0.0f, -90.0f));
+	Body->SetRelativeRotation(FRotator(0.0f, -90.0f, 0.0f));
+	Body->SetOwnerNoSee(false);
+	Body->SetVisibility(true, true);
+	Body->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	Body->SetSimulatePhysics(false);
+	Body->SetAllBodiesSimulatePhysics(false);
+
+	float AnimLen = 1.2f;
+	if (DeadAnim)
+	{
+		AnimLen = FMath::Max(0.4f, DeadAnim->GetPlayLength());
+		Body->PlayAnimation(DeadAnim, false);
+	}
+
+	const float RagdollDelay = AnimLen * FMath::Clamp(DeathAnimToRagdollFraction, 0.2f, 0.95f);
+	GetWorldTimerManager().SetTimer(DeathRagdollTimerHandle, this,
+		&ALoopedCharacter::StartPOVDeathRagdoll, RagdollDelay, false);
+
+	// Hold the death cam at least through most of the anim + a beat of settle.
+	DeathCamDuration = FMath::Max(DeathCamDuration, AnimLen + 0.6f);
+
+	UE_LOG(LogLoopedCore, Display, TEXT("[POV] Meshy death body up (anim %.2fs, ragdoll @ %.2fs)."),
+		AnimLen, RagdollDelay);
+}
+
+void ALoopedCharacter::StartPOVDeathRagdoll()
+{
+	if (USkeletalMeshComponent* M = GetMesh())
+	{
+		M->Stop();
+		M->SetCollisionProfileName(TEXT("Ragdoll"));
+		M->SetSimulatePhysics(true);
+		M->SetAllBodiesSimulatePhysics(true);
+		M->WakeAllRigidBodies();
+		M->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
 	}
 }
 
@@ -238,6 +399,22 @@ void ALoopedCharacter::PlayHeroAttackAnim(bool bMelee)
 void ALoopedCharacter::SetWeaponVisualMesh(UStaticMesh* NewMesh)
 {
 	if (!WeaponMeshComp) return;
+
+	if (bPOVStickMode && FirstPersonCamera)
+	{
+		// Stay on the camera — never re-seat onto a hand bone in POV mode.
+		if (WeaponMeshComp->GetAttachParent() != FirstPersonCamera)
+		{
+			WeaponMeshComp->AttachToComponent(FirstPersonCamera, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+		}
+		WeaponMeshComp->SetStaticMesh(NewMesh);
+		WeaponMeshComp->SetVisibility(NewMesh != nullptr);
+		WeaponMeshComp->SetRelativeLocation(POVStickIdleLoc);
+		WeaponMeshComp->SetRelativeRotation(POVStickIdleRot);
+		WeaponMeshComp->SetRelativeScale3D(POVStickIdleScale);
+		return;
+	}
+
 	// Re-assert the socket attachment in case the socket name changed in defaults after construction.
 	if (WeaponMeshComp->GetAttachSocketName() != WeaponAttachSocket)
 	{
@@ -291,25 +468,33 @@ void ALoopedCharacter::BeginPlay()
 		BaseCameraRelLoc = FirstPersonCamera->GetRelativeLocation();
 	}
 
-	// FP head-clip fix: the eye camera sits at head height, so hide the head bone (whichever
-	// naming this mesh uses — Wanderer "Head" / Manny "head"). Un-hidden by the death cam so
-	// the 3rd-person corpse keeps its head.
-	if (USkeletalMeshComponent* BodyMesh = GetMesh())
+	// POV stick mode: hide the body, put the Branch on the camera. Skips Manny head-hide /
+	// hero-visual kit (those only matter when the body is visible).
+	if (bPOVStickMode)
 	{
-		static const FName HeadBoneNames[] = { FName(TEXT("Head")), FName(TEXT("head")) };
-		for (const FName& Bone : HeadBoneNames)
+		SetupPOVStickMode();
+	}
+	else
+	{
+		// FP head-clip fix: the eye camera sits at head height, so hide the head bone (whichever
+		// naming this mesh uses — Wanderer "Head" / Manny "head"). Un-hidden by the death cam so
+		// the 3rd-person corpse keeps its head.
+		if (USkeletalMeshComponent* BodyMesh = GetMesh())
 		{
-			if (BodyMesh->GetBoneIndex(Bone) != INDEX_NONE)
+			static const FName HeadBoneNames[] = { FName(TEXT("Head")), FName(TEXT("head")) };
+			for (const FName& Bone : HeadBoneNames)
 			{
-				BodyMesh->HideBoneByName(Bone, EPhysBodyOp::PBO_None);
-				break;
+				if (BodyMesh->GetBoneIndex(Bone) != INDEX_NONE)
+				{
+					BodyMesh->HideBoneByName(Bone, EPhysBodyOp::PBO_None);
+					break;
+				}
 			}
 		}
-	}
 
-	// The hero's real body (heronew Wanderer): mesh + anim kit + weapon-socket auto-detect.
-	// Re-hides the head on the new mesh itself.
-	ApplyHeroVisual();
+		// Optional hero visual kit (heronew). Re-hides the head on the new mesh itself.
+		ApplyHeroVisual();
+	}
 
 	// Fade in from black on every level load. Paired with APortalActor's fade-out before travel,
 	// this masks the one-time synchronous OpenLevel hitch so the transition reads as a smooth fade
@@ -468,20 +653,17 @@ UAbilitySystemComponent* ALoopedCharacter::GetAbilitySystemComponent() const
 
 float ALoopedCharacter::GetHealthPercent() const
 {
-	if (const ULoopedAttributeSet* Attrs = AbilitySystemComponent->GetSet<ULoopedAttributeSet>())
-	{
-		return (Attrs->GetMaxHealth() > 0.0f) ? Attrs->GetHealth() / Attrs->GetMaxHealth() : 0.0f;
-	}
-	return 0.0f;
+	// Combat HP is POCCurrentHealth (TakeDamageFromEnemy never writes GAS Health).
+	return GetPOCHealthPercent();
 }
 
 bool ALoopedCharacter::IsAlive() const
 {
-	if (const ULoopedAttributeSet* Attrs = AbilitySystemComponent->GetSet<ULoopedAttributeSet>())
-	{
-		return Attrs->GetHealth() > 0.0f;
-	}
-	return false;
+	// MUST use POC HP — GAS AttributeSet Health is never synced by the combat path, so reading
+	// it left IsAlive() true after death. Hazards then kept ticking ApplyElementalStatus on a
+	// ragdolling corpse (death-cam mesh overlaps) → AV. Also null-guard ASC if anything else
+	// still peeks at it.
+	return POCCurrentHealth > 0.0f;
 }
 
 void ALoopedCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -791,13 +973,27 @@ void ALoopedCharacter::TakeDamageFromEnemy(float Damage)
 		{
 			Damage *= BrannPlateDamageMult;
 		}
-		// Lysa "Second Wind": once per run, a lethal hit leaves you at 1 HP instead of killing you.
+		// Lysa "Second Wind": once per run, a lethal hit leaves you at 50% max HP instead of killing you.
+		// (Was 1 HP — too fragile vs DoT; Sahar 2026-07-09.) Portal whoosh = audible revive cue.
 		if (Damage >= POCCurrentHealth && CompanionGI->HasArtifact(TEXT("Lysa")) && !CompanionGI->IsSecondWindUsed())
 		{
 			CompanionGI->MarkSecondWindUsed();
-			Damage = POCCurrentHealth - 1.0f;
+			const float ReviveHP = FMath::Max(1.0f, POCMaxHealth * 0.5f);
+			// Set HP directly — avoid negative-Damage heal math (logged as "took -N damage") and
+			// any re-entrancy surprises from Max(0, HP - negative).
+			POCCurrentHealth = ReviveHP;
+			Damage = 0.0f;
+			// Clear burn/poison DoT so the same tick chain can't finish you the frame after revive.
+			GetWorldTimerManager().ClearTimer(StatusBurnTimerHandle);
+			StatusBurnTicksRemaining = 0;
+			StatusBurnDamagePerTick = 0.0f;
+			// Same null-guard pattern as PortalActor::Travel — never PlaySound2D on a missing asset.
+			if (PortalTravelSound)
+			{
+				UGameplayStatics::PlaySound2D(this, PortalTravelSound);
+			}
 			ShowCenterMessage(FText::FromString(TEXT("LYSA PULLS YOU BACK — second wind!")), 2.5f);
-			UE_LOG(LogLoopedCore, Display, TEXT("[Companion] Second Wind consumed — lethal hit survived at 1 HP."));
+			UE_LOG(LogLoopedCore, Display, TEXT("[Companion] Second Wind consumed — lethal hit survived at %.0f HP (50%% max)."), ReviveHP);
 		}
 	}
 
@@ -843,6 +1039,16 @@ void ALoopedCharacter::EnterDeathCam()
 	// Death releases the chrono skill — the world must not stay slowed over a corpse.
 	EndChronoSkill();
 
+	// Stop DoT / status timers — ragdoll can re-overlap hazards; StatusBurnTick must not re-enter
+	// TakeDamageFromEnemy / death cam while we're already dead.
+	GetWorldTimerManager().ClearTimer(StatusBurnTimerHandle);
+	GetWorldTimerManager().ClearTimer(StatusSlowTimerHandle);
+	GetWorldTimerManager().ClearTimer(StatusWeakenTimerHandle);
+	StatusBurnTicksRemaining = 0;
+	StatusBurnDamagePerTick = 0.0f;
+	StatusSlowMultiplier = 1.0f;
+	StatusWeakenMultiplier = 1.0f;
+
 	// Freeze the player: no input, no movement.
 	if (APlayerController* PC = Cast<APlayerController>(GetController()))
 	{
@@ -854,33 +1060,39 @@ void ALoopedCharacter::EnterDeathCam()
 		Move->DisableMovement();
 	}
 
-	// Restore the head (hidden for first-person) so the 3rd-person death shot shows a whole body.
-	if (USkeletalMeshComponent* BodyMesh = GetMesh())
+	if (bPOVStickMode)
 	{
-		static const FName HeadBoneNames[] = { FName(TEXT("Head")), FName(TEXT("head")) };
-		for (const FName& Bone : HeadBoneNames)
+		// Meshy death body + anim, then physics settle. Stick is hidden inside.
+		BeginPOVDeathBody();
+	}
+	else
+	{
+		// Restore the head (hidden for first-person) so the 3rd-person death shot shows a whole body.
+		if (USkeletalMeshComponent* BodyMesh = GetMesh())
 		{
-			if (BodyMesh->GetBoneIndex(Bone) != INDEX_NONE)
+			static const FName HeadBoneNames[] = { FName(TEXT("Head")), FName(TEXT("head")) };
+			for (const FName& Bone : HeadBoneNames)
 			{
-				BodyMesh->UnHideBoneByName(Bone);
-				break;
+				if (BodyMesh->GetBoneIndex(Bone) != INDEX_NONE)
+				{
+					BodyMesh->UnHideBoneByName(Bone);
+					break;
+				}
 			}
+		}
+
+		// Ragdoll the hero so the body crumples to the floor (Manny's PA_Mannequin handles this well).
+		if (USkeletalMeshComponent* M = GetMesh())
+		{
+			M->SetOwnerNoSee(false);
+			M->SetCollisionProfileName(TEXT("Ragdoll"));
+			M->SetSimulatePhysics(true);
+			M->SetAllBodiesSimulatePhysics(true);
+			M->WakeAllRigidBodies();
+			M->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
 		}
 	}
 
-	// Ragdoll the hero so the body crumples to the floor (Manny's PA_Mannequin handles this well).
-	// NOTE: if a hero mesh with a broken/micro-scale physics asset ever returns (the old Meshy
-	// Wanderer import), swap this back to the pause-and-tip fallback — its ragdoll collapses to a
-	// speck. Make sure the body is visible to its owner and doesn't block via the capsule.
-	if (USkeletalMeshComponent* M = GetMesh())
-	{
-		M->SetOwnerNoSee(false);
-		M->SetCollisionProfileName(TEXT("Ragdoll"));
-		M->SetSimulatePhysics(true);
-		M->SetAllBodiesSimulatePhysics(true);
-		M->WakeAllRigidBodies();
-		M->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
-	}
 	if (UCapsuleComponent* Cap = GetCapsuleComponent())
 	{
 		Cap->SetCollisionEnabled(ECollisionEnabled::NoCollision);
@@ -1539,6 +1751,9 @@ void ALoopedCharacter::Tick(float DeltaSeconds)
 
 	// Hero body: single-node anim follows velocity (attack one-shots hold their window).
 	UpdateHeroAnim();
+
+	// POV Branch: breath bob + slash arc (skipped while dead).
+	UpdatePOVStick(DeltaSeconds);
 
 	// Proximity "Press [E] to ..." prompt (self-throttled to ~7Hz inside).
 	UpdateInteractPrompt(DeltaSeconds);

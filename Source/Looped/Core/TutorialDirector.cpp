@@ -2,6 +2,9 @@
 #include "Core/CompanionCage.h"
 #include "Core/PortalActor.h"
 #include "Core/LoopedGameInstance.h"
+#include "Core/GateActor.h"
+#include "Core/LoopedLever.h"
+#include "Core/DialogueTrigger.h"
 #include "Enemies/EnemyBase.h"
 #include "Player/LoopedCharacter.h"
 #include "Kismet/GameplayStatics.h"
@@ -15,25 +18,36 @@ ATutorialDirector::ATutorialDirector()
 	PrimaryActorTick.TickInterval = 0.15f; // state polling — no need for per-frame work
 
 	// Defaults are the shipping lines; every one is per-instance tunable in the level.
+	// Voice: short, plain words — no "glowing ground", no invented jargon walls.
 	MsgMovement     = FText::FromString(TEXT("MOVE — [W][A][S][D].   JUMP — [SPACE]."));
-	MsgChrono       = FText::FromString(TEXT("Press [Q] — bend time. The world slows; you slow less. Made for dodging."));
-	MsgCombat       = FText::FromString(TEXT("Void-spawn! [LEFT CLICK] — cut them down."));
-	MsgFreed        = FText::FromString(TEXT("He is free. Speak with him — [E]."));
-	MsgMonitor      = FText::FromString(TEXT("Press [MIDDLE CLICK] — raise the Arm Monitor. It slows the world and shields you while open."));
-	MsgMonitorPanel = FText::FromString(TEXT("The monitor remembers for you — objectives below, Orin's whispers above. Close it when ready."));
-	MsgCards        = FText::FromString(TEXT("A frequency surges. Choose a card — your deck is your build."));
-	MsgCombos       = FText::FromString(TEXT("Frequencies resonate. Certain pairs sing together — find the combos."));
-	MsgRelics       = FText::FromString(TEXT("Relics wait in the deep rooms. Artifacts outlive the loop itself."));
-	MsgPortal       = FText::FromString(TEXT("The way out is open."));
+	MsgHazard       = FText::FromString(TEXT("Lava burns. Ride the platform across."));
+	MsgLever        = FText::FromString(TEXT("Pull the lever — [E]. It opens the way."));
+	MsgChrono       = FText::FromString(TEXT("Press [Q] — time slows. Use it to dodge."));
+	MsgCombat       = FText::FromString(TEXT("Enemies! [LEFT CLICK] to fight."));
+	MsgFreed        = FText::FromString(TEXT("He is free. Talk to him — [E]."));
+	MsgMonitor      = FText::FromString(TEXT("Press [MIDDLE CLICK] — open your Arm Monitor."));
+	MsgMonitorPanel = FText::FromString(TEXT("Objectives and hints live here. Close it when ready."));
+	MsgCards        = FText::FromString(TEXT("Pick a card. Your deck is your build."));
+	MsgCombos       = FText::FromString(TEXT("Some cards work better together. Watch for pairs."));
+	MsgRelics       = FText::FromString(TEXT("Relics hide in deeper rooms. Keep what you find."));
+	MsgPortal       = FText::FromString(TEXT("Touch the Sphere — it takes you home."));
 
-	MsgMoveDone     = FText::FromString(TEXT("Good. Your body remembers how to move."));
-	MsgChronoDone   = FText::FromString(TEXT("Yes — time bends for you. Hold that feeling."));
-	MsgCombatDone   = FText::FromString(TEXT("The void is quiet again. Well fought."));
+	MsgMoveDone     = FText::FromString(TEXT("Good."));
+	MsgHazardDone   = FText::FromString(TEXT("You made it across."));
+	MsgLeverDone    = FText::FromString(TEXT("Open. Remember levers like this."));
+	MsgChronoDone   = FText::FromString(TEXT("Nice. Hold that feeling."));
+	MsgCombatDone   = FText::FromString(TEXT("Clear. Well fought."));
 }
 
 void ATutorialDirector::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// Orin stays silent until Freed — stops early E grant scrambling the teach order.
+	LockOrinDialogue(true);
+	// Lever stays dead until the Lever stage — through-wall E was toggling Gate_ToArena early
+	// (desync / crash) while Gate_AfterHazard was still closed.
+	if (TrainingLever) { TrainingLever->SetInteractionEnabled(false); }
 
 	// Replays run the FULL flow on purpose (hub Orin's "E to replay tutorial" — it stays a
 	// practice space). With the monitor already owned, the Freed stage self-advances on its
@@ -88,10 +102,41 @@ void ATutorialDirector::Tick(float DeltaSeconds)
 
 		if (bStageReady && DistanceMoved >= MoveDistanceRequired && bJumpSeen)
 		{
-			CompleteStage(ETutorialStage::Chrono, MsgMoveDone);
+			OpenGate(GateAfterMove); // immediate — don't wait for confirm beat
+			CompleteStage(ETutorialStage::Hazard, MsgMoveDone);
 		}
 		break;
 	}
+
+	case ETutorialStage::Hazard:
+	{
+		if (!bStageReady) break;
+		const FVector Pos = Player->GetActorLocation();
+		const bool bPastLava = Pos.Y <= HazardClearY;
+		const bool bAtGoal = HazardGoal
+			&& FVector::Dist2D(Pos, HazardGoal->GetActorLocation()) <= HazardGoalRadius;
+		if (bPastLava || bAtGoal)
+		{
+			// Open NOW — don't wait for the confirm-beat timer (Sahar: "wall won't go down").
+			OpenGate(GateAfterHazard);
+			CompleteStage(ETutorialStage::Lever, MsgHazardDone);
+		}
+		break;
+	}
+
+	case ETutorialStage::Lever:
+		if (bStageReady && TrainingLever && TrainingLever->HasBeenPulled())
+		{
+			OpenGate(GateToArena); // immediate — director owns this gate (lever has no LinkedGates)
+			CompleteStage(ETutorialStage::Chrono, MsgLeverDone);
+		}
+		else if (bStageReady && !TrainingLever)
+		{
+			UE_LOG(LogLoopedRun, Warning, TEXT("[Tutorial] No TrainingLever set — skipping lever stage."));
+			OpenGate(GateToArena);
+			CompleteStage(ETutorialStage::Chrono, MsgLeverDone);
+		}
+		break;
 
 	case ETutorialStage::Chrono:
 		if (bStageReady && Player->IsChronoSkillActive())
@@ -182,7 +227,19 @@ void ATutorialDirector::EnterStage(ETutorialStage NewStage)
 		SetPrompt(MsgMovement);
 		break;
 
+	case ETutorialStage::Hazard:
+		OpenGate(GateAfterMove); // idempotent if already opened from CompleteStage
+		SetPrompt(MsgHazard);
+		break;
+
+	case ETutorialStage::Lever:
+		OpenGate(GateAfterHazard);
+		if (TrainingLever) { TrainingLever->SetInteractionEnabled(true); }
+		SetPrompt(MsgLever);
+		break;
+
 	case ETutorialStage::Chrono:
+		OpenGate(GateToArena);
 		SetPrompt(MsgChrono);
 		break;
 
@@ -193,14 +250,12 @@ void ATutorialDirector::EnterStage(ETutorialStage NewStage)
 
 	case ETutorialStage::Freed:
 		if (Cage) { Cage->OpenCage(); }
+		LockOrinDialogue(false);
 		SetPrompt(MsgFreed);
 		break;
 
 	case ETutorialStage::Monitor:
-		// The exit stays LOCKED on a first run until the whole tutorial finishes (Sahar 2026-07-09:
-		// opening it here let you wander off / bail by accidentally talking to Orin again). It opens
-		// at Done (FinishTutorial). Replays already stand open from BeginPlay, so a returning player
-		// who taps E by mistake can still leave immediately — that path is untouched.
+		// Exit opens only at Done (FinishTutorial). Replays already stand open from BeginPlay.
 		SetPrompt(MsgMonitor);
 		break;
 
@@ -251,6 +306,19 @@ void ATutorialDirector::Say(const FText& Text, float Duration) const
 	if (ALoopedCharacter* Player = GetPlayerChar())
 	{
 		Player->ShowCenterMessage(Text, Duration);
+	}
+}
+
+void ATutorialDirector::OpenGate(AGateActor* Gate) const
+{
+	if (Gate) { Gate->Open(); }
+}
+
+void ATutorialDirector::LockOrinDialogue(bool bLocked) const
+{
+	if (OrinDialogue)
+	{
+		OrinDialogue->SetInteractionEnabled(!bLocked);
 	}
 }
 

@@ -25,7 +25,7 @@ struct FRunState
 	bool bHealthInitialized = false;   // false until the first combat room seeds health
 
 	// Once-per-run companion relic tokens (rescue system). Reset with the rest of the run state.
-	bool bSecondWindUsed = false;      // Lysa — survive one lethal hit at 1 HP
+	bool bSecondWindUsed = false;      // Lysa — survive one lethal hit at 50% max HP
 	bool bCardRerollUsed = false;      // Mira — reroll one card reward
 	bool bMiraFragmentTaken = false;   // Mira's rescue — one fragment per run (the reset scatters her again)
 
@@ -216,6 +216,10 @@ public:
 	// Console test-grant: open the ~ console and type e.g. "GrantArtifactCheat Wing".
 	UFUNCTION(Exec)
 	void GrantArtifactCheat(FName ArtifactName);
+
+	// Console test-grant for RUN blessings: e.g. "GrantRunArtifactCheat Ashwalker".
+	UFUNCTION(Exec)
+	void GrantRunArtifactCheat(FName ArtifactName);
 
 	// --- Echoes (permanent cross-run currency) ---
 	UFUNCTION(BlueprintPure, Category = "LOOPED|Currency")
@@ -630,7 +634,7 @@ public:
 	float SkillGaugePerRankSeconds = 1.0f;
 
 	// --- Rescued-companion relic tokens (once per run; see looped_rescue_system.md) ---
-	// Lysa "Second Wind": the Character consumes this when a lethal hit is survived at 1 HP.
+	// Lysa "Second Wind": the Character consumes this when a lethal hit is survived at 50% max HP.
 	bool IsSecondWindUsed() const { return CurrentRunState.bSecondWindUsed; }
 	void MarkSecondWindUsed() { CurrentRunState.bSecondWindUsed = true; }
 

@@ -111,8 +111,19 @@ void APortalActor::BeginPlay()
 		PortalLight->SetRelativeLocation(FXLocalOffset);
 	}
 
-	// A disabled portal hides itself at start and waits for ActivatePortal() (room-clear reveal).
-	SetPortalEnabled(!bStartDisabled);
+	// A disabled portal hides itself at start and waits for ActivatePortal() / SetForkType().
+	// IMPORTANT: GameMode may call ActivateRoomExitPortals() BEFORE this BeginPlay (actor order).
+	// If a fork type was already assigned, do NOT re-disable — that softlocked treasure/? rooms
+	// (Sahar: pick pedestal → no exit). F2 Puzzle / F3 Riddle / L_Treasure / DarkTreasure all share
+	// bStartDisabled fork portals, so this race hit every MappedType=Treasure room.
+	if (!RoomTypeId.IsNone())
+	{
+		SetPortalEnabled(true);
+	}
+	else
+	{
+		SetPortalEnabled(!bStartDisabled);
+	}
 }
 
 void APortalActor::SetPortalEnabled(bool bEnabled)

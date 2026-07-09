@@ -224,6 +224,9 @@ void ATreasureChest::AcceptPedestal()
 		{
 			if (*It && *It != this) (*It)->LockPedestal();
 		}
+		// Safety: treasure/? rooms should already have exits from GameMode entry, but if the
+		// portal BeginPlay race wiped them (or the player only looks after the pick), re-open now.
+		GI->ActivateRoomExitPortals();
 	}
 	OfferName        = FText::FromString(TEXT("TAKEN"));
 	OfferDescription = FText::FromString(TEXT("Acquired"));

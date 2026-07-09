@@ -26,6 +26,7 @@
 #include "NavigationSystem.h"
 #include "NavigationPath.h"
 #include "AIController.h"
+#include "Core/ElementalHazard.h"
 
 AEnemyBase::AEnemyBase()
 {
@@ -356,7 +357,22 @@ bool AEnemyBase::ApplyEnemyVisual(FName VisualRow)
 	if (!NewMesh) return false;
 
 	GetMesh()->SetSkeletalMesh(NewMesh);
-	GetMesh()->SetRelativeLocation(Row->MeshRelLocation);
+
+	// Float presentation + lava exception. Prefer DT_EnemyVisuals.bFloats; also hard-gate the
+	// F3_Ranged role so Hexweaver floaters work even if the DT row wasn't re-saved post-rebuild.
+	// Asset reminder: F3_Ranged mesh is floor2ranged/Hexweaver (F2↔F3 folder swap).
+	const bool bRowFloats = Row->bFloats || VisualRow == FName(TEXT("F3_Ranged"));
+	const float HoverBoost = Row->bFloats ? Row->FloatHoverBoostZ : 55.0f;
+	const float BobAmp = Row->bFloats ? Row->FloatBobAmplitude : 8.0f;
+	const float BobSpd = Row->bFloats ? Row->FloatBobSpeed : 1.8f;
+
+	// Floater kits raise the mesh so they hover; capsule stays grounded for collision/nav.
+	FVector MeshLoc = Row->MeshRelLocation;
+	if (bRowFloats)
+	{
+		MeshLoc.Z += HoverBoost;
+	}
+	GetMesh()->SetRelativeLocation(MeshLoc);
 	GetMesh()->SetRelativeRotation(FRotator(0.0f, Row->MeshRelYaw, 0.0f));
 	GetMesh()->SetRelativeScale3D(FVector(Row->MeshScale));
 	GetMesh()->SetAnimationMode(EAnimationMode::AnimationSingleNode);
@@ -377,8 +393,17 @@ bool AEnemyBase::ApplyEnemyVisual(FName VisualRow)
 	bVisualDriven = true;
 	CurrentVisualRow = VisualRow;
 	CurrentVisAnim = nullptr;
+
+	bFloats = bRowFloats;
+	bCanFloatOverHazards = bRowFloats;
+	FloatBobAmplitude = BobAmp;
+	FloatBobSpeed = BobSpd;
+	FloatBobRestZ = MeshLoc.Z;
+
 	PlayVisualAnim(VisIdle ? VisIdle.Get() : VisWalk.Get(), true);
-	UE_LOG(LogLoopedAI, Display, TEXT("%s: visual kit '%s' applied."), *GetName(), *VisualRow.ToString());
+	UE_LOG(LogLoopedAI, Display, TEXT("%s: visual kit '%s' applied%s."),
+		*GetName(), *VisualRow.ToString(),
+		bFloats ? TEXT(" (FLOAT — no walk, hover+bob, lava OK)") : TEXT(""));
 	return true;
 }
 
@@ -402,10 +427,25 @@ void AEnemyBase::UpdateVisualAnim()
 		PlayVisualAnim(Swing, false);
 		return;
 	}
+	// Floaters (F3 ranged): idle/float pose only — never walk/run while drifting.
+	if (bFloats)
+	{
+		PlayVisualAnim(VisIdle ? VisIdle.Get() : VisWalk.Get(), true);
+		return;
+	}
 	const float Speed = GetVelocity().Size2D();
 	if (Speed > 260.0f)     PlayVisualAnim(VisRun ? VisRun.Get() : VisWalk.Get(), true);
 	else if (Speed > 30.0f) PlayVisualAnim(VisWalk ? VisWalk.Get() : VisRun.Get(), true);
 	else                    PlayVisualAnim(VisIdle ? VisIdle.Get() : VisWalk.Get(), true);
+}
+
+void AEnemyBase::UpdateFloatBob(float DeltaTime)
+{
+	if (!bFloats || !GetMesh() || bIsDying) return;
+	FVector Rel = GetMesh()->GetRelativeLocation();
+	const double T = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0;
+	Rel.Z = FloatBobRestZ + FMath::Sin(T * FloatBobSpeed) * FloatBobAmplitude;
+	GetMesh()->SetRelativeLocation(Rel);
 }
 
 void AEnemyBase::Tick(float DeltaTime)
@@ -419,6 +459,7 @@ void AEnemyBase::Tick(float DeltaTime)
 
 	// Visual-kit pawns pick their single-node anim from the AI state + velocity each tick.
 	if (bVisualDriven) UpdateVisualAnim();
+	UpdateFloatBob(DeltaTime);
 
 	APlayerController* PC = GetWorld()->GetFirstPlayerController();
 	if (!PC) return;
@@ -541,14 +582,32 @@ void AEnemyBase::TickMelee(float DeltaTime, APawn* Player)
 			const float DistToFlank = FVector::Dist2D(FlankPoint, MyLoc);
 			const bool bFinalApproach = (Dist < LungeTriggerRange * 1.5f);
 			const FVector Destination = (bFinalApproach || DistToFlank < 180.0f) ? PlayerLoc : FlankPoint;
-			CurrentNavTarget = ComputeNavTarget(Destination);
+			// Don't path through lava/venom — stop at the hazard edge and wait (Sahar playtest).
+			CurrentNavTarget = ComputeNavTarget(AvoidHazardDestination(Destination));
 			bHasNavTarget = true;
 			PathRefreshTimer = PathRefreshInterval;
 		}
 		const FVector MoveDir = (CurrentNavTarget - MyLoc).GetSafeNormal2D();
-		if (!MoveDir.IsNearlyZero())
+		const bool bStandingInHazard = IsPointInActiveHazard(MyLoc);
+		// Refuse any step that would ENTER lava/venom — but if already burning, keep moving
+		// toward the escape nav target (AvoidHazardDestination scramble).
+		const bool bNextStepBurns = !MoveDir.IsNearlyZero()
+			&& IsPointInActiveHazard(MyLoc + MoveDir * 90.0f);
+		const bool bAllowStep = !MoveDir.IsNearlyZero()
+			&& (bStandingInHazard || !bNextStepBurns);
+		if (bAllowStep)
 		{
 			AddMovementInput(MoveDir, 1.0f);
+		}
+		// Standing in burn: keep scrambling out; don't windup/lunge from inside.
+		if (bStandingInHazard)
+		{
+			bHasNavTarget = false; // force repath out next tick
+			break;
+		}
+		if (IsPointInActiveHazard(PlayerLoc) || bNextStepBurns)
+		{
+			break; // player across the burn / next step is lava — wait on this bank
 		}
 		// Enter windup once close — frenzied enemies windup faster
 		if (Dist < LungeTriggerRange)
@@ -577,9 +636,21 @@ void AEnemyBase::TickMelee(float DeltaTime, APawn* Player)
 	}
 	case EEnemyAIState::Lunge:
 	{
-		// Drive STRAIGHT at the player for the whole lunge window
+		// Never lunge through / into an active hazard — abort to Approach and hold the edge.
 		const FVector LungeDir = (PlayerLoc - MyLoc).GetSafeNormal2D();
-		AddMovementInput(LungeDir, 1.0f);
+		const bool bLungeIntoHazard = IsPointInActiveHazard(PlayerLoc)
+			|| (!LungeDir.IsNearlyZero() && IsPointInActiveHazard(MyLoc + LungeDir * 120.0f));
+		if (bLungeIntoHazard && !IsPointInActiveHazard(MyLoc))
+		{
+			EnterState(EEnemyAIState::Approach);
+			bHasNavTarget = false;
+			break;
+		}
+		// Drive STRAIGHT at the player for the whole lunge window (only on safe ground).
+		if (!LungeDir.IsNearlyZero() && !bLungeIntoHazard)
+		{
+			AddMovementInput(LungeDir, 1.0f);
+		}
 		StateTimer -= DeltaTime;
 
 		// Apply contact damage if we make contact during the lunge
@@ -610,18 +681,26 @@ void AEnemyBase::TickMelee(float DeltaTime, APawn* Player)
 	case EEnemyAIState::Recover:
 	{
 		StateTimer -= DeltaTime;
+		// Recover must not walk into lava/venom either (whiff-press or backpedal).
 		if (bLungeConnected)
 		{
 			// Landed the hit — slight backpedal so it feels less zombie-like.
 			const FVector AwayDir = (MyLoc - PlayerLoc).GetSafeNormal2D();
-			AddMovementInput(AwayDir, 0.3f);
+			if (!AwayDir.IsNearlyZero() && !IsPointInActiveHazard(MyLoc + AwayDir * 90.0f))
+			{
+				AddMovementInput(AwayDir, 0.3f);
+			}
 		}
 		else
 		{
-			// Whiffed — press back IN instead of backpedaling, so we don't lose ground
-			// against a stationary player and air-punch forever.
+			// Whiffed — press back IN only on safe ground (never chase across a burn).
 			const FVector TowardDir = (PlayerLoc - MyLoc).GetSafeNormal2D();
-			AddMovementInput(TowardDir, 0.6f);
+			const bool bPressBurns = IsPointInActiveHazard(PlayerLoc)
+				|| (!TowardDir.IsNearlyZero() && IsPointInActiveHazard(MyLoc + TowardDir * 90.0f));
+			if (!TowardDir.IsNearlyZero() && !bPressBurns)
+			{
+				AddMovementInput(TowardDir, 0.6f);
+			}
 		}
 		if (StateTimer <= 0.0f)
 		{
@@ -697,13 +776,27 @@ void AEnemyBase::TickRanged(float DeltaTime, APawn* Player)
 
 	if (PathRefreshTimer <= 0.0f || !bHasNavTarget)
 	{
-		CurrentNavTarget = ComputeNavTarget(DesiredDest);
+		// Ranged avoid lava/venom (Sahar softlock) — F3 floaters are the sole exception.
+		const FVector Dest = bCanFloatOverHazards ? DesiredDest : AvoidHazardDestination(DesiredDest);
+		CurrentNavTarget = ComputeNavTarget(Dest);
 		bHasNavTarget = true;
 		PathRefreshTimer = PathRefreshInterval;
 	}
 
 	const FVector MoveDir = (CurrentNavTarget - MyLoc).GetSafeNormal2D();
-	if (!MoveDir.IsNearlyZero())
+	const bool bStandingInHazard = !bCanFloatOverHazards && IsPointInActiveHazard(MyLoc);
+	const bool bNextStepBurns = !bCanFloatOverHazards && !MoveDir.IsNearlyZero()
+		&& IsPointInActiveHazard(MyLoc + MoveDir * 90.0f);
+	if (bStandingInHazard)
+	{
+		// Scramble out — force repath every tick until clear of the burn.
+		bHasNavTarget = false;
+		if (!MoveDir.IsNearlyZero())
+		{
+			AddMovementInput(MoveDir, 1.0f);
+		}
+	}
+	else if (!MoveDir.IsNearlyZero() && !bNextStepBurns)
 	{
 		AddMovementInput(MoveDir, 1.0f);
 	}
@@ -779,6 +872,13 @@ FVector AEnemyBase::ComputeNavTarget(const FVector& Destination)
 		for (int32 i = 1; i < Path->PathPoints.Num(); ++i)
 		{
 			const FVector& Pt = Path->PathPoints[i];
+			// Refuse to step into an active hazard along the path (melee + ranged).
+			// Floaters (F3 ranged) skip this — they alone may drift over lava.
+			if (!bCanFloatOverHazards && IsPointInActiveHazard(Pt))
+			{
+				// Return the previous safe point (or stay put).
+				return (i > 1) ? Path->PathPoints[i - 1] : MyLoc;
+			}
 			if (FVector::Dist2D(Pt, MyLoc) > 50.0f)
 			{
 				return Pt;
@@ -787,9 +887,105 @@ FVector AEnemyBase::ComputeNavTarget(const FVector& Destination)
 		return Path->PathPoints.Last();
 	}
 
-	// No usable path. Walk toward the destination directly — the jump cooldown and
-	// stuck detector will handle the case where we grind on a wall.
-	return Destination;
+	// No usable path (often a Null nav hole over lava). Floaters bee-line; others stop short.
+	return bCanFloatOverHazards ? Destination : AvoidHazardDestination(Destination);
+}
+
+bool AEnemyBase::IsPointInActiveHazard(const FVector& Point) const
+{
+	// F3 ranged floaters ignore hazard volumes for pathing (visual hover over lava).
+	if (bCanFloatOverHazards) return false;
+	UWorld* World = GetWorld();
+	if (!World) return false;
+	// Inflate XY so AI stop SHORT of the burn (don't toe the lava edge / clip the volume).
+	// Z: only the floor-strip band — elevated platforms (Crossing z80+, LavaField overlook
+	// z300) must stay walkable even when their XY sits over a hazard footprint.
+	static constexpr float HazardPadXY = 120.0f;
+	static constexpr float HazardPadZ = 40.0f;
+	for (TActorIterator<AElementalHazard> It(World); It; ++It)
+	{
+		const AElementalHazard* H = *It;
+		if (!H || !H->IsHazardActive()) continue;
+		const FBox Box = H->GetHazardBounds();
+		const float MinX = Box.Min.X - HazardPadXY;
+		const float MaxX = Box.Max.X + HazardPadXY;
+		const float MinY = Box.Min.Y - HazardPadXY;
+		const float MaxY = Box.Max.Y + HazardPadXY;
+		const float MinZ = Box.Min.Z - HazardPadZ;
+		const float MaxZ = Box.Max.Z + HazardPadZ;
+		if (Point.X >= MinX && Point.X <= MaxX
+			&& Point.Y >= MinY && Point.Y <= MaxY
+			&& Point.Z >= MinZ && Point.Z <= MaxZ)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+FVector AEnemyBase::AvoidHazardDestination(const FVector& Destination) const
+{
+	const FVector MyLoc = GetActorLocation();
+	if (IsPointInActiveHazard(MyLoc))
+	{
+		// Scramble OUT — prefer a safe Destination; else step away from hazard centers.
+		if (!IsPointInActiveHazard(Destination)) return Destination;
+		FVector Away = FVector::ZeroVector;
+		int32 Count = 0;
+		for (TActorIterator<AElementalHazard> It(GetWorld()); It; ++It)
+		{
+			const AElementalHazard* H = *It;
+			if (!H || !H->IsHazardActive()) continue;
+			const FBox Box = H->GetHazardBounds();
+			const float MinX = Box.Min.X - 120.0f;
+			const float MaxX = Box.Max.X + 120.0f;
+			const float MinY = Box.Min.Y - 120.0f;
+			const float MaxY = Box.Max.Y + 120.0f;
+			const float MinZ = Box.Min.Z - 40.0f;
+			const float MaxZ = Box.Max.Z + 40.0f;
+			if (!(MyLoc.X >= MinX && MyLoc.X <= MaxX
+				&& MyLoc.Y >= MinY && MyLoc.Y <= MaxY
+				&& MyLoc.Z >= MinZ && MyLoc.Z <= MaxZ))
+			{
+				continue;
+			}
+			Away += (MyLoc - H->GetActorLocation()).GetSafeNormal2D();
+			++Count;
+		}
+		if (Count > 0)
+		{
+			return MyLoc + Away.GetSafeNormal2D() * 500.0f;
+		}
+		return MyLoc;
+	}
+
+	auto StopBeforeHazard = [this, &MyLoc](const FVector& Dest) -> FVector
+	{
+		const FVector Delta = Dest - MyLoc;
+		const float Len = Delta.Size2D();
+		if (Len < 1.0f) return MyLoc;
+		const FVector Dir = Delta.GetSafeNormal2D();
+		const int32 Steps = FMath::Clamp(FMath::CeilToInt(Len / 60.0f), 1, 50);
+		for (int32 s = 1; s <= Steps; ++s)
+		{
+			const FVector Sample = MyLoc + Dir * (Len * (float(s) / float(Steps)));
+			if (IsPointInActiveHazard(Sample))
+			{
+				// Stop well short of the padded edge so they never toe into the burn.
+				const float SafeDist = FMath::Max(0.0f, Len * (float(s - 1) / float(Steps)) - 80.0f);
+				return MyLoc + Dir * SafeDist;
+			}
+		}
+		return Dest;
+	};
+
+	if (!IsPointInActiveHazard(Destination))
+	{
+		return StopBeforeHazard(Destination);
+	}
+
+	// Destination is inside a hazard (player on the far bank / platform) — hold this bank.
+	return StopBeforeHazard(Destination);
 }
 
 bool AEnemyBase::HasLineOfSightTo(AActor* Target) const

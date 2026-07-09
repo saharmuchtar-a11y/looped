@@ -46,7 +46,7 @@ Inside the monitor (the middle-click hologram — the same UI that hosts card pi
 
 | Companion | Identity | Rescue method (each DIFFERENT) | Unlock gate | Permanent buff (UNIQUE — nowhere else) |
 |---|---|---|---|---|
-| **Lysa** | Hunter-medic | **The Jailor** — COMBAT mission (`L_Rescue_Lysa`): a Warden mini-boss holds her cage; defeat it → cage opens → freed → portal home. | after **first boss kill** (SaveData already tracks this) | **Second Wind** — once per run, survive a lethal hit at 1 HP (cheat death) |
+| **Lysa** | Hunter-medic | **The Jailor** — COMBAT mission (`L_Rescue_Lysa`): a Warden mini-boss holds her cage; defeat it → cage opens → freed → portal home. | after **first boss kill** (SaveData already tracks this) | **Second Wind** — once per run, survive a lethal hit at **50% max HP** (was 1 HP; Sahar 2026-07-09 — DoT was finishing you) |
 | **Brann** | Smith | **The Forge** — PUZZLE/ADVENTURE mission (`L_Rescue_Brann`): a sealed forge; solve its mechanisms (e.g. find + activate 3 forge-keys in sequence / route the heat) to open his cell. Light or no combat. | reach Floor 2 / N clears | **Forged Plate** — take **10% less damage**, always (the ONLY flat damage-reduction in the game) |
 | **Serin** | Scout / thief | **Vorr's Ransom** — NON-combat bargain at the Hub (Vorr holds her as collateral): pay Echoes **+ accept a curse/sacrifice** (fits the "never free" rule + Vorr lore). No mission level. | Echoes threshold / vault unlocked | **Fence** — Vorr's shop prices **15% cheaper** (the ONLY discount in the game) |
 | **Mira** | Frequency-reader | **The Scattered Frequency** — COLLECTION meta: "frequency echo" fragments drop in normal runs; collect N → she reforms at the Hub on your next return. No mission level. | collect N fragments over runs | **Reroll** — once per run, reroll a card reward for a fresh set of options (the ONLY reroll in the game) |
@@ -75,7 +75,10 @@ Distinct rescue MODES: **combat (Lysa) / puzzle-adventure (Brann) / bargain-sacr
   effects are code, not magnitude, so they stay unique + un-stackable.
 - **C++ (needs build):** each buff is a bespoke `HasArtifact("Name")` hook, exactly like Wing/GoldBar:
   - Lysa **Second Wind**: in `TakeDamageFromEnemy`, if a hit would be lethal and the once-per-run flag is
-    unused, clamp to 1 HP + consume the flag (reset at run/Hub start).
+    unused, set HP to **50% max** + play `/Game/Audio/portal` + clear DoT + consume the flag (reset at run/Hub start).
+    (Was 1 HP; Sahar 2026-07-09 — DoT was finishing you after the save.)
+    **Crash fix (same day):** `IsAlive()` must use `POCCurrentHealth` (GAS Health is unsynced); death-cam
+    ragdoll into hazards used to AV in `ApplyElementalStatus`. See memory `project-looped-lysa-second-wind`.
   - Brann **Forged Plate**: in `TakeDamageFromEnemy`, `if (HasArtifact("Brann")) Damage *= 0.9;` (before HP sub).
   - Serin **Fence**: in the shop cost calc, `if (HasArtifact("Serin")) Cost = ceil(Cost * 0.85);`.
   - Mira **Reroll**: in the card-reward draft, if `HasArtifact("Mira")` and the per-run reroll token is unused, show a

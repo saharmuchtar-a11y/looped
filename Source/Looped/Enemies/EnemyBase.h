@@ -207,6 +207,12 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Ranged")
 	float KiteStrafeDistance = 350.0f;
 
+	// Floater exception (F3 ranged): ignore ElementalHazard avoidance + bee-line over Null
+	// nav holes. Set automatically from DT_EnemyVisuals.bFloats (F3_Ranged). Melee/other
+	// ranged keep refusing lava. Capsule still walks the floor — only the MESH floats.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Float")
+	bool bCanFloatOverHazards = false;
+
 	// --- Guard post ---
 	// > 0 = this enemy DEFENDS its spawn spot instead of chasing across the map: kiting/strafing is
 	// clamped inside this radius of home, melee only engages targets near the post, and a strayed
@@ -401,6 +407,7 @@ private:
 	FName AutoVisualRow() const;
 	void UpdateVisualAnim();
 	void PlayVisualAnim(class UAnimSequence* Anim, bool bLoop);
+	void UpdateFloatBob(float DeltaTime);
 
 	UPROPERTY() TObjectPtr<class UDataTable> VisualTable;
 	UPROPERTY() TObjectPtr<class UAnimSequence> VisIdle;
@@ -411,6 +418,10 @@ private:
 	UPROPERTY() TObjectPtr<class UAnimSequence> VisDeath;
 	UPROPERTY() TObjectPtr<class UAnimSequence> CurrentVisAnim;
 	bool bVisualDriven = false;
+	bool bFloats = false;
+	float FloatBobAmplitude = 8.0f;
+	float FloatBobSpeed = 1.8f;
+	float FloatBobRestZ = 0.0f;
 	FName CurrentVisualRow = NAME_None;
 	// Captured at BeginPlay so Respawn() can un-ragdoll the mesh back to its rig pose.
 	FTransform MeshDefaultRelativeTransform;
@@ -547,6 +558,15 @@ private:
 
 	// Returns next path point to move toward (or destination if no path / nav)
 	FVector ComputeNavTarget(const FVector& Destination);
+
+	// True if a world point sits inside an ACTIVE ElementalHazard volume (floor-height XY).
+	// Elevated platforms above the burn strip are NOT treated as hazard.
+	bool IsPointInActiveHazard(const FVector& Point) const;
+
+	// If Destination (or the step toward it) crosses an active hazard, return a stop-short
+	// point on this side of the hazard edge. Applies to melee AND ranged (Sahar softlock).
+	// Empty hazards → Destination unchanged.
+	FVector AvoidHazardDestination(const FVector& Destination) const;
 
 	// Line of sight from VisualMesh height to the target's location
 	bool HasLineOfSightTo(AActor* Target) const;

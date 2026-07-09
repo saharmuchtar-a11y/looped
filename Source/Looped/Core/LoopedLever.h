@@ -42,6 +42,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lever")
 	bool bOneShot = false;
 
+	// True after at least one successful pull this load (tutorial stage gate; stays true on toggle reset).
+	UFUNCTION(BlueprintPure, Category = "Lever")
+	bool HasBeenPulled() const { return bEverPulled; }
+
+	// When false, Interact is a no-op and the proximity prompt hides (tutorial locks the lever
+	// until the Lever stage — stops through-wall E pulls desyncing linked gates).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lever")
+	bool bInteractionEnabled = true;
+
+	UFUNCTION(BlueprintCallable, Category = "Lever")
+	void SetInteractionEnabled(bool bEnabled);
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lever")
 	FText PromptVerb;
 
@@ -64,5 +76,6 @@ protected:
 
 private:
 	bool bPulled = false;
+	bool bEverPulled = false;
 	void ApplyLinks();
 };

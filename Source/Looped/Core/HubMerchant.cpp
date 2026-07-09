@@ -347,9 +347,13 @@ void AHubMerchant::RefreshShop()
 			H.Cost = InRunHealCost + HealBuyCount * InRunHealCostStep; // rising price
 			Displayed.Add(H);
 
-			FShopItem Cl; Cl.Type = EShopGoodType::CleanseCurse; Cl.Id = TEXT("Cleanse");
-			Cl.Display = TEXT("Cleanse a curse"); Cl.Cost = InRunCleanseCost;
-			Displayed.Add(Cl);
+			// Hide cleanse when the run has no curses — buying it was a silent no-op (Sahar playtest).
+			if (GI && GI->GetActiveCurses().Num() > 0)
+			{
+				FShopItem Cl; Cl.Type = EShopGoodType::CleanseCurse; Cl.Id = TEXT("Cleanse");
+				Cl.Display = TEXT("Cleanse a curse"); Cl.Cost = InRunCleanseCost;
+				Displayed.Add(Cl);
+			}
 
 			// The cache's star item: a random run Blessing.
 			FShopItem Bl; Bl.Type = EShopGoodType::RunBlessing; Bl.Id = TEXT("Blessing");
@@ -627,9 +631,22 @@ void AHubMerchant::TryBuy(int32 SlotIndex)
 		case EShopGoodType::CleanseCurse:
 		{
 			TArray<FName> Curses = GI->GetActiveCurses();
-			if (Curses.Num() > 0 && GI->SpendShards(Item.Cost))
+			if (Curses.Num() == 0)
+			{
+				if (Player)
+				{
+					Player->ShowCenterMessage(FText::FromString(TEXT("Nothing to cleanse.")), 2.0f);
+				}
+				break;
+			}
+			if (GI->SpendShards(Item.Cost))
 			{
 				GI->RemoveCurse(Curses[0]);
+				if (Player)
+				{
+					Player->ShowCenterMessage(FText::FromString(
+						FString::Printf(TEXT("Cleansed: %s"), *Curses[0].ToString())), 2.5f);
+				}
 			}
 			break;
 		}

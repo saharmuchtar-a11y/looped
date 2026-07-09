@@ -247,17 +247,70 @@ public:
 	// --- Hero visual kit (heronew Wasteland Wanderer; a DT_EnemyVisuals row, same system as
 	// the enemies). None = keep the mannequin + AnimBP. Applied at BeginPlay: mesh swap,
 	// single-node anims by velocity, weapon socket auto-detected on the new rig.
+	// NOTE: ignored while bPOVStickMode is on (body stays hidden; Meshy only appears on death).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Visual")
-	FName HeroVisualRow = FName(TEXT("Hero"));
+	FName HeroVisualRow = NAME_None;
 
 	// One-shot swing/charge on the hero body — WeaponHolder calls this on every shot, so the
 	// player SEES the hit (melee = Attack anim, ranged = the rifle-charge in the Cast slot).
 	void PlayHeroAttackAnim(bool bMelee);
 
+	// --- POV stick mode (alive = Branch on camera only; death = Meshy body). Flip false to
+	// revert to classic Manny-in-hand. Safe revert path — assets stay in the project.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|POV")
+	bool bPOVStickMode = true;
+
+	// Idle Branch pose relative to the FP camera (forward / right / down).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|POV")
+	FVector POVStickIdleLoc = FVector(42.0f, 18.0f, -18.0f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|POV")
+	FRotator POVStickIdleRot = FRotator(22.0f, 205.0f, -42.0f);
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|POV")
+	FVector POVStickIdleScale = FVector(0.16f, 0.19f, 0.19f);
+
+	// Soft breath bob (cm of vertical travel + cycles per second).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|POV")
+	float BreathBobAmplitude = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|POV")
+	float BreathBobSpeed = 0.85f;
+
+	// Hit swing: 0→1 over duration, peaks at mid-swing then returns to idle.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|POV")
+	float POVSwingDuration = 0.22f;
+
+	// Peak relative rotation at mid-swing (slash across the view).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|POV")
+	FRotator POVSwingPeakRot = FRotator(-42.0f, 210.0f, 55.0f);
+
+	// Meshy corpse for death cam (Dead package — mesh/anim/physics must stay together).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|POV|Death")
+	TSoftObjectPtr<USkeletalMesh> DeathBodyMesh;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|POV|Death")
+	TSoftObjectPtr<UAnimSequence> DeathBodyAnim;
+
+	// Meshy Dead import is ~1.6uu tall; ×111 ≈ Manny height (~180uu).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|POV|Death")
+	float DeathBodyScale = 111.0f;
+
+	// Fraction of the death anim to play before enabling physics settle (ragdoll-like).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|POV|Death", meta = (ClampMin = "0.2", ClampMax = "0.95"))
+	float DeathAnimToRagdollFraction = 0.65f;
+
 private:
 	void ApplyHeroVisual();
 	void UpdateHeroAnim();
 	void PlayHeroAnim(class UAnimSequence* Anim, bool bLoop);
+
+	void SetupPOVStickMode();
+	void UpdatePOVStick(float DeltaSeconds);
+	void StartPOVStickSwing();
+	void ApplyPOVStickPose(float SwingAlpha01, float BreathPhase);
+	void BeginPOVDeathBody();
+	void StartPOVDeathRagdoll();
 
 	UPROPERTY() TObjectPtr<class UAnimSequence> HeroIdle;
 	UPROPERTY() TObjectPtr<class UAnimSequence> HeroWalk;
@@ -267,6 +320,10 @@ private:
 	UPROPERTY() TObjectPtr<class UAnimSequence> HeroCurrentAnim;
 	bool bHeroVisualDriven = false;
 	double HeroAttackHoldUntil = 0.0;
+
+	float BreathPhase = 0.0f;
+	float POVSwingElapsed = -1.0f; // <0 = idle; else seconds into the swing
+	FTimerHandle DeathRagdollTimerHandle;
 
 public:
 
@@ -328,6 +385,10 @@ protected:
 	// Played on jump (loaded by path in the ctor).
 	UPROPERTY()
 	TObjectPtr<class USoundBase> JumpSound;
+
+	// Same /Game/Audio/portal as PortalActor — played on Lysa Second Wind revive.
+	UPROPERTY()
+	TObjectPtr<class USoundBase> PortalTravelSound;
 
 public:
 	// Add a brief positional camera shake (the no-freeze impact "punch"). Intensity ~0.6 = a melee

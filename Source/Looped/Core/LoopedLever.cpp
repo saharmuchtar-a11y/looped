@@ -50,10 +50,17 @@ void ALoopedLever::BeginPlay()
 	}
 }
 
+void ALoopedLever::SetInteractionEnabled(bool bEnabled)
+{
+	bInteractionEnabled = bEnabled;
+}
+
 void ALoopedLever::Interact(ALoopedCharacter* Player)
 {
+	if (!bInteractionEnabled) return;
 	if (bOneShot && bPulled) return;
 	bPulled = !bPulled;
+	if (bPulled) { bEverPulled = true; }
 
 	// Throw the handle (the Forge's "thrown" look) — roll over on pull, back upright on reset.
 	if (LeverMesh)
@@ -89,6 +96,7 @@ void ALoopedLever::ApplyLinks()
 
 FText ALoopedLever::GetInteractPrompt() const
 {
+	if (!bInteractionEnabled) return FText::GetEmpty();
 	if (bOneShot && bPulled) return FText::GetEmpty(); // dead lever keeps quiet
 	return PromptVerb;
 }
