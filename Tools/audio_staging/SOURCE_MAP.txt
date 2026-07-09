@@ -1,0 +1,21 @@
+# Looped audio SOURCE MAP — all Kenney.nl packs, Creative Commons CC0 1.0
+# https://creativecommons.org/publicdomain/zero/1.0/
+
+portal.ogg  <=  kenney_rpg / Audio/clothBelt2.ogg  (CC0 Kenney)
+melee_swoosh.ogg  <=  kenney_rpg / Audio/knifeSlice.ogg  (CC0 Kenney)
+melee_impact.ogg  <=  kenney_impact / Audio/impactPunch_heavy_000.ogg  (CC0 Kenney)
+player_hurt.ogg  <=  kenney_impact / Audio/impactPunch_medium_001.ogg  (CC0 Kenney)
+enemy_hurt.ogg  <=  kenney_impact / Audio/impactPunch_heavy_002.ogg  (CC0 Kenney)
+ranged_shot.ogg  <=  kenney_digital / Audio/laser1.ogg  (CC0 Kenney)
+jump.ogg  <=  kenney_impact / Audio/footstep_concrete_000.ogg  (CC0 Kenney)
+button.ogg  <=  kenney_ui / Audio/switch1.ogg  (CC0 Kenney)
+melee_windup.ogg  <=  kenney_rpg / Audio/drawKnife2.ogg  (CC0 Kenney)
+ranged_telegraph.ogg  <=  kenney_digital / Audio/phaserUp2.ogg  (CC0 Kenney)
+hazard_fire.ogg  <=  kenney_impact / Audio/footstep_snow_000.ogg  (CC0 Kenney)
+hazard_ice.ogg  <=  kenney_impact / Audio/impactGlass_light_000.ogg  (CC0 Kenney)
+hazard_venom.ogg  <=  kenney_impact / Audio/impactSoft_medium_000.ogg  (CC0 Kenney)
+hazard_void.ogg  <=  kenney_rpg / Audio/metalClick.ogg  (CC0 Kenney)
+enemy_dodge.ogg  <=  kenney_rpg / Audio/cloth3.ogg  (CC0 Kenney)
+player_death.ogg  <=  kenney_impact / Audio/impactPunch_heavy_003.ogg  (CC0 Kenney)
+lever.ogg  <=  kenney_ui / Audio/switch2.ogg  (CC0 Kenney)
+card_confirm.ogg  <=  kenney_ui / Audio/click5.ogg  (CC0 Kenney)

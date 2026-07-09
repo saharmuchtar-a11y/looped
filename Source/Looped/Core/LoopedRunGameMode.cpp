@@ -21,8 +21,10 @@
 #include "Components/CanvasPanelSlot.h"
 #include "TimerManager.h"
 #include "Core/LoopedGameInstance.h"
+#include "Core/TreasureChest.h"
 #include "Player/LoopedCharacter.h"
 #include "Data/RoomRouting.h"
+#include "Data/TreasureTypes.h"
 
 ALoopedRunGameMode::ALoopedRunGameMode()
 {
@@ -48,14 +50,15 @@ void ALoopedRunGameMode::BeginPlay()
 	bRunActive = true;
 
 	// Fresh save arriving at the Hub → tutorial first (Orin gives the monitor there).
-	// Contains() also matches PIE's UEDPIE_ map prefix; the tutorial level itself never
-	// redirects, and post-rescue the artifact is owned so the Hub loads normally forever.
+	// Skip once bTutorialCompleted (or Orin owned on legacy saves). Contains() also matches
+	// PIE's UEDPIE_ map prefix; the tutorial level itself never redirects.
 	if (!TutorialGateArtifact.IsNone() && !TutorialLevelName.IsNone() &&
 		GetWorld()->GetMapName().Contains(TEXT("L_Hub")))
 	{
 		if (ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
 		{
-			if (!GI->HasArtifact(TutorialGateArtifact))
+			const bool bDone = GI->HasCompletedTutorial() || GI->HasArtifact(TutorialGateArtifact);
+			if (!bDone)
 			{
 				UE_LOG(LogLoopedRun, Display, TEXT("[Tutorial] Fresh save — routing Hub -> %s."), *TutorialLevelName.ToString());
 				UGameplayStatics::OpenLevel(this, TutorialLevelName);
@@ -275,6 +278,11 @@ void ALoopedRunGameMode::SpawnBossIfBossLevel()
 				UE_LOG(LogLoopedRun, Display, TEXT("Boss row '%s' applied (floor %d)."),
 					*BossRow.ToString(), FloorGI->GetCurrentFloor());
 			}
+			// Floor-3 hero-copy: melee mirror with hero mesh + Branch + player's deck snapshot.
+			if (BossRow == FloorGI->Floor3HeroCopyBossRow || BossRow == FName(TEXT("HeroCopy")))
+			{
+				Boss->SetupAsHeroCopy();
+			}
 		}
 		BossSpawnedAtSeconds = World->GetTimeSeconds();
 		UE_LOG(LogLoopedRun, Display, TEXT("Boss spawned at %s (%s)"),
@@ -376,29 +384,35 @@ void ALoopedRunGameMode::HandleBossDied(AEnemyBase* /*Boss*/)
 	if (ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
 	{
 		GI->AddBossKill(KillSeconds);
-		GI->AddEchoes(EchoesBossBonus); // boss-clear Echoes bonus
+		GI->AddEchoes(EchoesBossBonus); // every floor boss pays Echoes
 
-		// FLOORS: a mid-run boss opens the DESCENT — the run continues (deck/relics/HP carry),
-		// so no AddRunCompleted and no EndRunPath. Only the final floor's boss ends the run.
+		// Mid-floor bosses: "?" blessing/cards mark, then descend. Final boss ends the run —
+		// no pedestal (game is over); Echoes are the prize.
 		if (!GI->IsFinalFloor())
 		{
+			SpawnBossRewardPedestal();
 			const FName NextRoom = GI->BeginNextFloor();
 			SpawnDescentPortal(NextRoom);
 			if (ALoopedCharacter* Player = Cast<ALoopedCharacter>(UGameplayStatics::GetPlayerCharacter(this, 0)))
 			{
-				Player->ShowCenterMessage(FText::FromString(TEXT("The loop deepens...")), 4.0f);
+				Player->ShowCenterMessage(FText::FromString(TEXT("A mark appears — claim it, then descend.")), 4.0f);
 			}
 			UE_LOG(LogLoopedRun, Display, TEXT("Floor boss down in %.1fs — descent portal to '%s' (floor %d)."),
 				KillSeconds, *NextRoom.ToString(), GI->GetCurrentFloor());
 			return;
 		}
-		GI->AddRunCompleted(); // The Looped has fallen — the run is truly complete
+		GI->AddRunCompleted(); // The Looped / HeroCopy has fallen — the run is truly complete
 	}
 
-	// Boss is C++-spawned, so ABossRoomExit::BeginPlay couldn't see it at level load.
-	// Spawn the hub portal directly here so the player gets their exit.
+	// Final boss: hub portal only. Boss is C++-spawned, so ABossRoomExit couldn't bind at load.
 	SpawnHubPortal(FName(TEXT("L_Hub")));
-	UE_LOG(LogLoopedRun, Display, TEXT("Boss died in %.1fs — hub portal spawned."), KillSeconds);
+	if (ALoopedCharacter* Player = Cast<ALoopedCharacter>(UGameplayStatics::GetPlayerCharacter(this, 0)))
+	{
+		Player->ShowCenterMessage(
+			FText::FromString(FString::Printf(TEXT("The loop breaks. +%d Echoes — press [E] on the portal home."), EchoesBossBonus)),
+			5.0f);
+	}
+	UE_LOG(LogLoopedRun, Display, TEXT("Final boss died in %.1fs — Echoes only, hub portal spawned."), KillSeconds);
 }
 
 void ALoopedRunGameMode::EnsureNavMeshExists()
@@ -670,6 +684,35 @@ void ALoopedRunGameMode::SetCursorVisibility(bool bVisible)
 	if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
 	{
 		PC->bShowMouseCursor = bVisible;
+	}
+}
+
+void ALoopedRunGameMode::SpawnBossRewardPedestal()
+{
+	ACharacter* Player = UGameplayStatics::GetPlayerCharacter(this, 0);
+	if (!Player || !GetWorld()) return;
+
+	if (ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
+	{
+		GI->ResetTreasurePicks();
+	}
+
+	FVector SpawnLoc = Player->GetActorLocation() + Player->GetActorForwardVector() * 220.0f;
+	SpawnLoc.Z = Player->GetActorLocation().Z;
+
+	FActorSpawnParameters Params;
+	Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	if (ATreasureChest* Pedestal = GetWorld()->SpawnActor<ATreasureChest>(
+		ATreasureChest::StaticClass(), SpawnLoc, FRotator::ZeroRotator, Params))
+	{
+		Pedestal->RewardType = (FMath::FRand() < 0.5f)
+			? ETreasureRewardType::CleanRelic
+			: ETreasureRewardType::CardBundle;
+		Pedestal->CardBundleCount = 3;
+		Pedestal->ApplyQuestionMarkRewardVisual();
+		Pedestal->RerollOffer();
+		UE_LOG(LogLoopedRun, Display, TEXT("Boss reward pedestal spawned (%s)."),
+			Pedestal->RewardType == ETreasureRewardType::CardBundle ? TEXT("cards") : TEXT("blessing"));
 	}
 }
 

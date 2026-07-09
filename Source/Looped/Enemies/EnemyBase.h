@@ -4,6 +4,7 @@
 #include "GameFramework/Character.h"
 #include "AbilitySystemInterface.h"
 #include "Data/EnemyData.h"
+#include "Data/PassiveCardData.h"
 #include "EnemyBase.generated.h"
 
 class ULoopedAbilitySystemComponent;
@@ -19,6 +20,7 @@ enum class EEnemyAIState : uint8
 	Windup          UMETA(DisplayName = "Windup"),
 	Lunge           UMETA(DisplayName = "Lunge"),
 	Recover         UMETA(DisplayName = "Recover"),
+	Dodge           UMETA(DisplayName = "Dodge"),
 	Kite            UMETA(DisplayName = "Kite"),
 	SpecialWindup   UMETA(DisplayName = "SpecialWindup"),
 	SpecialBurst    UMETA(DisplayName = "SpecialBurst"),
@@ -74,6 +76,19 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Visual")
 	FName VisualRowOverride = NAME_None;
 
+	// Floor-3 hero-copy boss: melee-only mirror. Snapshots the player's RunDeck at fight start
+	// (no relics / blessings), forces Hero visual + Branch stick in hand_r, never shoots.
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|HeroCopy")
+	void SetupAsHeroCopy();
+
+	UFUNCTION(BlueprintPure, Category = "LOOPED|HeroCopy")
+	bool IsHeroCopy() const { return bHeroCopy; }
+
+	// Player HEAVY melee connect: shove back + interrupt an in-progress windup/lunge. Bosses and
+	// frozen enemies ignore it; the shove is cancelled if it would land the enemy in a hazard.
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Enemy")
+	void ApplyHeavyImpact(const FVector& FromDirection, float KnockbackSpeed);
+
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|Enemy")
 	void Respawn();
 
@@ -111,6 +126,10 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UStaticMeshComponent> VisualMesh;
 
+	// Branch stick held by the Floor-3 hero-copy boss (world-visible hand attach).
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UStaticMeshComponent> HeldWeaponMesh;
+
 	// --- Archetype (DT_Enemies) ---
 	// Row to apply from the enemy-type table. NAME_None = use the values below as-is (legacy
 	// per-instance tuning keeps working untouched). Set per placed enemy, or by the spawner.
@@ -136,6 +155,10 @@ protected:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "POC")
 	float MeleeHitCooldown = 1.0f;
+
+	// Resolved melee job (from DT row / Scale). Drives cadence + dodge rhythm.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "POC")
+	EMeleeRole MeleeRole = EMeleeRole::Regular;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "POC")
 	bool bIsRanged = false;
@@ -175,8 +198,37 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Melee")
 	float RecoverDuration = 0.35f;
 
+	// Extra recover after a WHIFF (miss) — Regular/Tank get longer punish windows.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Melee")
+	float WhiffRecoverMultiplier = 1.0f;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Melee")
 	float MeleeContactRange = 140.0f;
+
+	// --- Jump-back dodge (Meshy Back_Jump / VisDodge) ---
+	// Enemies create space under player pressure instead of only chasing.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Dodge")
+	float DodgeCooldown = 3.2f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Dodge")
+	float DodgeDuration = 0.45f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Dodge")
+	float DodgeDistance = 280.0f;
+
+	// Chance to jump back when conditions are met (role presets overwrite).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Dodge", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float DodgeChance = 0.35f;
+
+	// Player must be within this range to trigger a pressure dodge.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Dodge")
+	float DodgeTriggerRange = 220.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Dodge")
+	float DodgeLaunchSpeed = 700.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Dodge")
+	float DodgeLaunchZ = 220.0f;
 
 	// Hybrid combat: a RANGED enemy/boss that ALSO melees (windup→lunge + attack anim) when the
 	// player gets close, instead of only kiting + shooting. Set true on bosses.
@@ -207,9 +259,7 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Ranged")
 	float KiteStrafeDistance = 350.0f;
 
-	// Floater exception (F3 ranged): ignore ElementalHazard avoidance + bee-line over Null
-	// nav holes. Set automatically from DT_EnemyVisuals.bFloats (F3_Ranged). Melee/other
-	// ranged keep refusing lava. Capsule still walks the floor — only the MESH floats.
+	// DEPRECATED (Sahar 2026-07-09): no enemy floats over lava. Kept for BP/DT compat; always forced false.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Float")
 	bool bCanFloatOverHazards = false;
 
@@ -255,6 +305,13 @@ protected:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Frenzy")
 	float FrenzyWindupMultiplier = 0.55f;
+
+	// Tanks keep a milder frenzy so they don't suddenly become swarm.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Frenzy")
+	float TankFrenzyWindupMultiplier = 0.80f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Frenzy")
+	float TankFrenzySpeedMultiplier = 1.15f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AI|Frenzy")
 	FLinearColor FrenzyColor = FLinearColor(1.0f, 0.05f, 0.05f, 1.0f);
@@ -386,6 +443,9 @@ protected:
 	// a stationary player can't farm air-punches.
 	bool bLungeConnected = false;
 
+	float DodgeCooldownTimer = 0.0f;
+	FVector DodgeMoveDir = FVector::ZeroVector;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UWidgetComponent> HPBarWidget;
 
@@ -393,6 +453,25 @@ private:
 	void Die();
 	void BurnTick();
 	void VenomTick();
+
+	// --- Floor-3 hero-copy (melee mirror) ---
+	bool bHeroCopy = false;
+	// Snapshot of the player's RunDeck at fight start — deck only (no relics/blessings).
+	TArray<FPassiveSlot> HeroCopyDeck;
+	void AttachHeroCopyBranch();
+	void NormalizeHeldWeaponTransform();
+	void ApplyHeroCopyDeckOnHit(class ALoopedCharacter* Player);
+	float GetHeroCopyOutgoingDamageMult() const;
+	FTimerHandle HeldWeaponNormalizeTimerHandle;
+
+	UPROPERTY(EditAnywhere, Category = "LOOPED|HeroCopy")
+	FName HeldWeaponSocket = FName(TEXT("hand_r"));
+
+	UPROPERTY(EditAnywhere, Category = "LOOPED|HeroCopy")
+	FVector HeldWeaponWorldScale = FVector(0.3375f, 0.4f, 0.4f);
+
+	UPROPERTY(EditAnywhere, Category = "LOOPED|HeroCopy")
+	FVector HeldWeaponGripOffset = FVector(12.0f, 10.6f, 26.6f);
 
 	// Death sequence: Die() fires gameplay events immediately, then plays a death anim or ragdolls;
 	// FinishDeathHide() hides the corpse once that finishes. bIsDying guards against double-death.
@@ -416,6 +495,7 @@ private:
 	UPROPERTY() TObjectPtr<class UAnimSequence> VisAttack;
 	UPROPERTY() TObjectPtr<class UAnimSequence> VisCast;
 	UPROPERTY() TObjectPtr<class UAnimSequence> VisDeath;
+	UPROPERTY() TObjectPtr<class UAnimSequence> VisDodge;
 	UPROPERTY() TObjectPtr<class UAnimSequence> CurrentVisAnim;
 	bool bVisualDriven = false;
 	bool bFloats = false;
@@ -587,7 +667,15 @@ private:
 
 	// Creative behaviors
 	FVector ComputeFlankPoint(const APawn* Player) const;
+	// Flanker: prefer a point behind the player (not a ring slot around them).
+	FVector ComputeBehindFlankPoint(const APawn* Player) const;
 	void CheckEnterFrenzy();
+	void ApplyMeleeRoleDefaults(EMeleeRole ResolvedRole);
+	EMeleeRole ResolveMeleeRole(FName RowName, const FEnemyTypeData& Row) const;
+	bool TryBeginDodge(APawn* Player, bool bFromPlayerHit);
+	void TickDodge(float DeltaTime, APawn* Player);
+	// Ranged: pick a nearby nav point that has clear LOS to the player (and isn't on a hazard).
+	FVector FindLOSHoldPoint(const APawn* Player) const;
 	// bRoomWide = true alerts EVERY living enemy regardless of radius (curse "Bounty" on kills).
 	void AlertNearbyEnemies(AActor* Cause, bool bRoomWide = false);
 	void BeginTelegraph();

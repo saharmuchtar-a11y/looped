@@ -4,6 +4,19 @@
 #include "Engine/DataTable.h"
 #include "EnemyData.generated.h"
 
+// Melee combat job. Drives lunge cadence / recover / dodge rhythm in ApplyEnemyType.
+// Auto = derive from Scale + known row names (Hound→Flanker, small→Swarm, big→Tank).
+UENUM(BlueprintType)
+enum class EMeleeRole : uint8
+{
+	Auto     UMETA(DisplayName = "Auto (from Scale)"),
+	Swarm    UMETA(DisplayName = "Swarm (small / aggressive)"),
+	Regular  UMETA(DisplayName = "Regular (readable melee)"),
+	Tank     UMETA(DisplayName = "Tank (big / telegraphed)"),
+	Flanker  UMETA(DisplayName = "Flanker (circle to back)"),
+	None     UMETA(DisplayName = "None (ranged / boss cadence)"),
+};
+
 // One row in DT_Enemies — an enemy ARCHETYPE. A placed/spawned enemy sets its EnemyTypeRow and
 // BeginPlay applies this row over the EnemyBase defaults, so adding a new enemy type (or tuning
 // an existing one) = editing a row, no code and no new Blueprint. Fields mirror the live
@@ -39,6 +52,10 @@ struct FEnemyTypeData : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Behavior")
 	bool bHybridMelee = false;
 
+	// Melee job. Auto derives from Scale / known names so old DT rows keep working until retagged.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Behavior")
+	EMeleeRole MeleeRole = EMeleeRole::Auto;
+
 	// --- Combat ---
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat")
 	float MeleeDamage = 5.0f;
@@ -53,6 +70,22 @@ struct FEnemyTypeData : public FTableRowBase
 	// Melee tell length — shorter = harder to react to. Keep >= 0.3 so the tell stays readable.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat")
 	float WindupDuration = 0.6f;
+
+	// Optional per-row cadence overrides. 0 = use the MeleeRole preset (preferred).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|MeleeCadence", meta = (ClampMin = "0.0"))
+	float LungeTriggerRange = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|MeleeCadence", meta = (ClampMin = "0.0"))
+	float RecoverDuration = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|MeleeCadence", meta = (ClampMin = "0.0"))
+	float MeleeHitCooldown = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|MeleeCadence", meta = (ClampMin = "0.0"))
+	float LungeSpeedMultiplier = 0.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat|MeleeCadence", meta = (ClampMin = "0.0"))
+	float MeleeContactRange = 0.0f;
 
 	// DT_ProjectileElements RowName for this archetype's shots (orb color + damage mult + status).
 	// "None" = plain grey orb. Also the hook for themed rooms (fire room spawns Fire enemies).
@@ -71,4 +104,10 @@ struct FEnemyTypeData : public FTableRowBase
 	// First floor this archetype can appear on (escalation lever for Floors 2-3).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spawning")
 	int32 MinFloor = 1;
+
+	// When true, winning a dialogue StartFight against this archetype spawns the "?" pedestal
+	// (blessing OR cards). Normal packs (Grunt/Hound/Random/etc.) clear the room and open exits
+	// with no pedestal. Boss-room / FloorBoss paths spawn their own pedestal in GameMode.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Rewards")
+	bool bGrantsBossReward = false;
 };

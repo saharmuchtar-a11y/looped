@@ -30,7 +30,7 @@ ATutorialDirector::ATutorialDirector()
 	MsgCards        = FText::FromString(TEXT("Pick a card. Your deck is your build."));
 	MsgCombos       = FText::FromString(TEXT("Some cards work better together. Watch for pairs."));
 	MsgRelics       = FText::FromString(TEXT("Relics hide in deeper rooms. Keep what you find."));
-	MsgPortal       = FText::FromString(TEXT("Touch the Sphere — it takes you home."));
+	MsgPortal       = FText::FromString(TEXT("Press [E] on the Sphere — it takes you home."));
 
 	MsgMoveDone     = FText::FromString(TEXT("Good."));
 	MsgHazardDone   = FText::FromString(TEXT("You made it across."));
@@ -49,17 +49,32 @@ void ATutorialDirector::BeginPlay()
 	// (desync / crash) while Gate_AfterHazard was still closed.
 	if (TrainingLever) { TrainingLever->SetInteractionEnabled(false); }
 
-	// Replays run the FULL flow on purpose (hub Orin's "E to replay tutorial" — it stays a
-	// practice space). With the monitor already owned, the Freed stage self-advances on its
-	// next poll (dialogue grant is idempotent), so nothing blocks or double-grants.
-	// On replay the exit portal ALSO stands open from the start — practice must never trap
-	// you (Sahar: "no way to leave the tutorial"). Fresh saves earn it at Done; if one bails
-	// through a stray exit anyway, the Hub's routing just bounces them back in.
+	// Completed tutorial: skip the teach corridor — open the exit and let them leave to hub/run.
+	// Optional replay still works if they walk the stages, but they are never trapped.
 	if (const ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
 	{
-		if (GI->HasArtifact(MonitorArtifact) && ExitPortal)
+		if (GI->HasCompletedTutorial() || GI->HasArtifact(MonitorArtifact))
 		{
-			ExitPortal->ActivatePortal();
+			if (ExitPortal) ExitPortal->ActivatePortal();
+			// The stage machine is parked at Done, so nothing else will ever open the teach
+			// gates — open ALL of them now or the replaying player is walled off from the
+			// Sphere at the corridor's end (softlock).
+			OpenGate(GateAfterMove);
+			OpenGate(GateAfterHazard);
+			OpenGate(GateToArena);
+			LockOrinDialogue(false);
+			if (TrainingLever) TrainingLever->SetInteractionEnabled(true);
+			// Delay the greeting a beat — the player pawn may not exist yet during BeginPlay.
+			TWeakObjectPtr<ATutorialDirector> WeakThis(this);
+			GetWorldTimerManager().SetTimer(StageAdvanceHandle, FTimerDelegate::CreateLambda([WeakThis]()
+			{
+				if (WeakThis.IsValid())
+				{
+					WeakThis->Say(FText::FromString(TEXT("You know this place. Press [E] on the Sphere to leave — or stay and practice.")), 6.0f);
+				}
+			}), 1.0f, false);
+			Stage = ETutorialStage::Done;
+			return;
 		}
 	}
 	EnterStage(ETutorialStage::Movement);
@@ -379,6 +394,10 @@ void ATutorialDirector::FireCardDraft()
 
 void ATutorialDirector::FinishTutorial()
 {
+	if (ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
+	{
+		GI->MarkTutorialCompleted();
+	}
 	if (ExitPortal)
 	{
 		ExitPortal->ActivatePortal();

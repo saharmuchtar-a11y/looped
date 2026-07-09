@@ -14,6 +14,7 @@
 #include "Core/LoopedRunGameMode.h"
 #include "UI/LoopedPauseMenuWidget.h"
 #include "Data/PassiveCardData.h"
+#include "Data/ArtifactData.h"
 #include "Data/EnemyVisualData.h"
 #include "SloMo/SloMoManager.h"
 #include "Components/ProgressBar.h"
@@ -64,7 +65,7 @@ ALoopedCharacter::ALoopedCharacter()
 
 	GetCharacterMovement()->MaxWalkSpeed = BaseWalkSpeed;
 	GetCharacterMovement()->JumpZVelocity = FMath::Sqrt(2.0f * 980.0f * JumpHeight);
-	GetCharacterMovement()->AirControl = 0.8f;
+	GetCharacterMovement()->AirControl = 0.55f; // tighter base air feel (was 0.8)
 	GetCharacterMovement()->BrakingDecelerationFalling = 0.0f;
 	GetCharacterMovement()->FallingLateralFriction = 0.0f;
 	GetCharacterMovement()->NavAgentProps.bCanCrouch = true;
@@ -208,6 +209,23 @@ void ALoopedCharacter::StartPOVStickSwing()
 	POVSwingElapsed = 0.0f;
 }
 
+void ALoopedCharacter::SetMeleeChargeVisual(float Alpha01)
+{
+	MeleeChargeVisual = FMath::Clamp(Alpha01, 0.0f, 1.0f);
+	if (FirstPersonCamera)
+	{
+		// Slight FOV pull-in while charging — readable without a UI bar.
+		FirstPersonCamera->SetFieldOfView(BaseCameraFOV - 6.0f * MeleeChargeVisual);
+	}
+}
+
+void ALoopedCharacter::NotifyHeavyMeleeSwing()
+{
+	bHeavySwingPending = true;
+	// Slightly longer slash so the heavy reads on the POV Branch.
+	POVSwingDuration = 0.32f;
+}
+
 void ALoopedCharacter::ApplyPOVStickPose(float SwingAlpha01, float InBreathPhase)
 {
 	if (!WeaponMeshComp || !bPOVStickMode) return;
@@ -215,18 +233,31 @@ void ALoopedCharacter::ApplyPOVStickPose(float SwingAlpha01, float InBreathPhase
 	const float BreathZ = FMath::Sin(InBreathPhase) * BreathBobAmplitude;
 	FVector Loc = POVStickIdleLoc + FVector(0.0f, 0.0f, BreathZ);
 	FRotator Rot = POVStickIdleRot;
+	FVector Scale = POVStickIdleScale;
+
+	// Charge swell: Branch grows toward the camera while holding M2.
+	if (MeleeChargeVisual > KINDA_SMALL_NUMBER)
+	{
+		const float Swell = 1.0f + 0.35f * MeleeChargeVisual;
+		Scale *= Swell;
+		Loc += FVector(4.0f, 0.0f, 2.0f) * MeleeChargeVisual;
+		Rot.Pitch += -8.0f * MeleeChargeVisual; // tip up into view
+	}
 
 	if (SwingAlpha01 > KINDA_SMALL_NUMBER)
 	{
 		// 0→1→0 bell: ease out to peak at mid-swing, ease back to idle.
 		const float Bell = FMath::Sin(SwingAlpha01 * PI);
-		Rot = FMath::Lerp(POVStickIdleRot, POVSwingPeakRot, Bell);
-		Loc += FVector(6.0f, -4.0f, 2.0f) * Bell; // push slightly into view on the slash
+		const FRotator Peak = bHeavySwingPending
+			? FRotator(POVSwingPeakRot.Pitch - 18.0f, POVSwingPeakRot.Yaw, POVSwingPeakRot.Roll + 20.0f)
+			: POVSwingPeakRot;
+		Rot = FMath::Lerp(POVStickIdleRot, Peak, Bell);
+		Loc += FVector(bHeavySwingPending ? 10.0f : 6.0f, -4.0f, 2.0f) * Bell;
 	}
 
 	WeaponMeshComp->SetRelativeLocation(Loc);
 	WeaponMeshComp->SetRelativeRotation(Rot);
-	WeaponMeshComp->SetRelativeScale3D(POVStickIdleScale);
+	WeaponMeshComp->SetRelativeScale3D(Scale);
 }
 
 void ALoopedCharacter::UpdatePOVStick(float DeltaSeconds)
@@ -245,6 +276,8 @@ void ALoopedCharacter::UpdatePOVStick(float DeltaSeconds)
 		{
 			POVSwingElapsed = -1.0f;
 			SwingA = 0.0f;
+			bHeavySwingPending = false;
+			POVSwingDuration = 0.22f; // restore light slash timing
 		}
 	}
 
@@ -451,6 +484,11 @@ void ALoopedCharacter::NormalizeWeaponTransform()
 void ALoopedCharacter::BeginPlay()
 {
 	Super::BeginPlay();
+
+	if (FirstPersonCamera)
+	{
+		BaseCameraFOV = FirstPersonCamera->FieldOfView;
+	}
 
 	// Seed the chrono gauge from the run state (-1 = fresh run → start full).
 	if (const ULoopedGameInstance* SkillGI = GetGameInstance<ULoopedGameInstance>())
@@ -926,7 +964,7 @@ void ALoopedCharacter::StartFire(const FInputActionValue& Value)
 	{
 		WeaponHolder->StartFiring();
 	}
-	PlayRandomAttackAnim();
+	// Swing anim is triggered from WeaponHolder::FireWeapon (melee waits for charge release).
 }
 
 void ALoopedCharacter::StopFire(const FInputActionValue& Value)
@@ -1565,19 +1603,22 @@ void ALoopedCharacter::RefreshDashboard()
 	}
 	SetText(TEXT("PerksText"), Perks.IsEmpty() ? FString(TEXT("(no cards yet)")) : Perks);
 
-	// Right: relics + curses (names for now; icon wrap-boxes are a polish follow-up)
-	// Run blessings + curses as "Name — what it does" so nothing on the monitor is a mystery word.
+	// Right: run blessings — NAMES (+ rarity) only (Sahar: too much text on the monitor).
 	FString Relics;
 	for (const FName& Id : GI->GetRunArtifacts())
 	{
 		const FArtifactData* R = GI->FindArtifactRow(Id);
-		if (R && !R->Description.IsEmpty())
+		if (R)
 		{
-			Relics += FString::Printf(TEXT("%s — %s\n"), *R->DisplayName.ToString(), *R->Description.ToString());
+			const TCHAR* Rarity =
+				(R->Rarity == ECardRarity::Epic) ? TEXT("Epic") :
+				(R->Rarity == ECardRarity::Rare) ? TEXT("Rare") :
+				(R->Rarity == ECardRarity::Cursed) ? TEXT("Cursed") : TEXT("Common");
+			Relics += FString::Printf(TEXT("%s  [%s]\n"), *R->DisplayName.ToString(), Rarity);
 		}
 		else
 		{
-			Relics += FString::Printf(TEXT("%s\n"), R ? *R->DisplayName.ToString() : *Id.ToString());
+			Relics += FString::Printf(TEXT("%s\n"), *Id.ToString());
 		}
 	}
 	SetText(TEXT("RelicsText"), Relics.IsEmpty() ? FString(TEXT("(none)")) : Relics);

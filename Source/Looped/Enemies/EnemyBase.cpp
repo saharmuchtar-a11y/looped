@@ -15,6 +15,8 @@
 #include "Enemies/EnemyProjectile.h"
 #include "Enemies/BossBase.h"
 #include "Data/EnemyVisualData.h"
+#include "Data/PassiveCardData.h"
+#include "GameplayTagContainer.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Kismet/GameplayStatics.h"
 #include "TimerManager.h"
@@ -48,6 +50,13 @@ AEnemyBase::AEnemyBase()
 		VisualMesh->SetStaticMesh(CubeMesh.Object);
 	}
 
+	// Branch stick for the Floor-3 hero-copy boss (attached to hand_r when SetupAsHeroCopy runs).
+	HeldWeaponMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("HeldWeaponMesh"));
+	HeldWeaponMesh->SetupAttachment(GetMesh(), HeldWeaponSocket);
+	HeldWeaponMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	HeldWeaponMesh->SetVisibility(false);
+	HeldWeaponMesh->SetCastShadow(false);
+
 	// Cache the enemy materials so BeginPlay can force-assign one (by bIsRanged). Both expose the
 	// BaseColor/EmissiveColor params RefreshColor drives — assigning in C++ means the color system
 	// no longer depends on a (loseable) Blueprint material slot.
@@ -63,7 +72,6 @@ AEnemyBase::AEnemyBase()
 	if (HurtSnd.Succeeded()) EnemyHurtSound = HurtSnd.Object;
 	static ConstructorHelpers::FObjectFinder<USoundBase> ShotSnd(TEXT("/Game/Audio/ranged_shot.ranged_shot"));
 	if (ShotSnd.Succeeded()) RangedShotSound = ShotSnd.Object;
-
 	// Default attack anims (Manny unarmed) — swappable per-enemy in the editor.
 	static ConstructorHelpers::FObjectFinder<UAnimSequence> Atk1(TEXT("/Game/Characters/Mannequins/Anims/Unarmed/Attack/MM_Attack_01.MM_Attack_01"));
 	if (Atk1.Succeeded()) AttackAnims.Add(Atk1.Object);
@@ -172,6 +180,19 @@ bool AEnemyBase::ApplyEnemyType(FName RowName)
 	ProjectileElement = Row->ProjectileElement;
 	SetActorScale3D(FVector(Row->Scale));
 
+	// Melee role cadence (Swarm/Regular/Tank/Flanker) — bosses keep their own wider ranges.
+	MeleeRole = ResolveMeleeRole(RowName, *Row);
+	if (!IsA<ABossBase>())
+	{
+		ApplyMeleeRoleDefaults(MeleeRole);
+	}
+	// Optional per-row overrides (0 = keep role preset).
+	if (Row->LungeTriggerRange > 0.0f)   { LungeTriggerRange = Row->LungeTriggerRange; }
+	if (Row->RecoverDuration > 0.0f)     { RecoverDuration = Row->RecoverDuration; }
+	if (Row->MeleeHitCooldown > 0.0f)     { MeleeHitCooldown = Row->MeleeHitCooldown; }
+	if (Row->LungeSpeedMultiplier > 0.0f){ LungeSpeedMultiplier = Row->LungeSpeedMultiplier; }
+	if (Row->MeleeContactRange > 0.0f)   { MeleeContactRange = Row->MeleeContactRange; }
+
 	// Floors 2-3: deeper floors hit harder and last longer (per-floor knobs on the GameInstance).
 	// Bosses are EXEMPT — their DT rows are absolute per-floor tuning, not floor-multiplied.
 	if (!IsA<ABossBase>())
@@ -211,7 +232,13 @@ bool AEnemyBase::ApplyEnemyType(FName RowName)
 		GI->RecordEnemySeen(RowName);
 	}
 
-	UE_LOG(LogLoopedAI, Display, TEXT("%s: applied enemy type '%s' (HP=%.0f %s%s)"), *GetName(), *RowName.ToString(), POCHealth, bIsRanged ? TEXT("RANGED") : TEXT("MELEE"), bHybridMelee ? TEXT("+HYBRID") : TEXT(""));
+	UE_LOG(LogLoopedAI, Display, TEXT("%s: applied enemy type '%s' (HP=%.0f %s%s role=%d)"), *GetName(), *RowName.ToString(), POCHealth, bIsRanged ? TEXT("RANGED") : TEXT("MELEE"), bHybridMelee ? TEXT("+HYBRID") : TEXT(""), (int32)MeleeRole);
+
+	// HeroCopy row: finish melee-mirror setup (deck snapshot + Branch). Safe if GameMode also calls it.
+	if (RowName == FName(TEXT("HeroCopy")))
+	{
+		SetupAsHeroCopy();
+	}
 	return true;
 }
 
@@ -271,7 +298,8 @@ void AEnemyBase::BeginPlay()
 	GetCharacterMovement()->AvoidanceConsiderationRadius = 200.0f;
 
 	// Bosses start ranged regardless of bIsRanged on the BP instance — Phase 2 unlocks melee/teleport.
-	if (bIsBoss)
+	// EXCEPTION: Floor-3 HeroCopy is a melee-only mirror (Branch stick, no projectiles).
+	if (bIsBoss && !bHeroCopy && EnemyTypeRow != FName(TEXT("HeroCopy")))
 	{
 		bIsRanged = true;
 		AIState = EEnemyAIState::Kite;
@@ -282,6 +310,16 @@ void AEnemyBase::BeginPlay()
 		}
 		BaseSpeed = MoveSpeed;
 		// Don't override boss cosmetics — BP scale/color stays.
+	}
+	else if (bIsBoss && (bHeroCopy || EnemyTypeRow == FName(TEXT("HeroCopy"))))
+	{
+		// Melee mirror: Approach AI, never kite/shoot. SetupAsHeroCopy (called after ApplyEnemyType)
+		// finalizes deck snapshot + Branch attach; BeginPlay may run before that on spawn path.
+		bIsRanged = false;
+		bHybridMelee = false;
+		bIsBoss = true; // keep boss HUD / death flow
+		AIState = EEnemyAIState::Approach;
+		BaseSpeed = MoveSpeed;
 	}
 	else if (bIsRanged)
 	{
@@ -331,6 +369,10 @@ void AEnemyBase::BeginPlay()
 
 FName AEnemyBase::AutoVisualRow() const
 {
+	if (bHeroCopy || EnemyTypeRow == FName(TEXT("HeroCopy")))
+	{
+		return FName(TEXT("Hero"));
+	}
 	int32 Floor = 1;
 	if (const ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
 	{
@@ -358,21 +400,10 @@ bool AEnemyBase::ApplyEnemyVisual(FName VisualRow)
 
 	GetMesh()->SetSkeletalMesh(NewMesh);
 
-	// Float presentation + lava exception. Prefer DT_EnemyVisuals.bFloats; also hard-gate the
-	// F3_Ranged role so Hexweaver floaters work even if the DT row wasn't re-saved post-rebuild.
-	// Asset reminder: F3_Ranged mesh is floor2ranged/Hexweaver (F2↔F3 folder swap).
-	const bool bRowFloats = Row->bFloats || VisualRow == FName(TEXT("F3_Ranged"));
-	const float HoverBoost = Row->bFloats ? Row->FloatHoverBoostZ : 55.0f;
-	const float BobAmp = Row->bFloats ? Row->FloatBobAmplitude : 8.0f;
-	const float BobSpd = Row->bFloats ? Row->FloatBobSpeed : 1.8f;
-
-	// Floater kits raise the mesh so they hover; capsule stays grounded for collision/nav.
-	FVector MeshLoc = Row->MeshRelLocation;
-	if (bRowFloats)
-	{
-		MeshLoc.Z += HoverBoost;
-	}
-	GetMesh()->SetRelativeLocation(MeshLoc);
+	// Grounded presentation for ALL kits (Sahar 2026-07-09: no one floats above lava).
+	// Asset reminder: F3_Ranged mesh is floor2ranged/Hexweaver (F2↔F3 folder swap) — still true,
+	// but float/bob/lava-exception presentation was reversed.
+	GetMesh()->SetRelativeLocation(Row->MeshRelLocation);
 	GetMesh()->SetRelativeRotation(FRotator(0.0f, Row->MeshRelYaw, 0.0f));
 	GetMesh()->SetRelativeScale3D(FVector(Row->MeshScale));
 	GetMesh()->SetAnimationMode(EAnimationMode::AnimationSingleNode);
@@ -390,20 +421,20 @@ bool AEnemyBase::ApplyEnemyVisual(FName VisualRow)
 	VisAttack = Row->Attack.LoadSynchronous();
 	VisCast   = Row->Cast.LoadSynchronous();
 	VisDeath  = Row->Death.LoadSynchronous();
+	VisDodge  = Row->Dodge.LoadSynchronous();
 	bVisualDriven = true;
 	CurrentVisualRow = VisualRow;
 	CurrentVisAnim = nullptr;
 
-	bFloats = bRowFloats;
-	bCanFloatOverHazards = bRowFloats;
-	FloatBobAmplitude = BobAmp;
-	FloatBobSpeed = BobSpd;
-	FloatBobRestZ = MeshLoc.Z;
+	bFloats = false;
+	bCanFloatOverHazards = false;
+	FloatBobAmplitude = 0.0f;
+	FloatBobSpeed = 0.0f;
+	FloatBobRestZ = Row->MeshRelLocation.Z;
 
 	PlayVisualAnim(VisIdle ? VisIdle.Get() : VisWalk.Get(), true);
-	UE_LOG(LogLoopedAI, Display, TEXT("%s: visual kit '%s' applied%s."),
-		*GetName(), *VisualRow.ToString(),
-		bFloats ? TEXT(" (FLOAT — no walk, hover+bob, lava OK)") : TEXT(""));
+	UE_LOG(LogLoopedAI, Display, TEXT("%s: visual kit '%s' applied."),
+		*GetName(), *VisualRow.ToString());
 	return true;
 }
 
@@ -416,6 +447,19 @@ void AEnemyBase::PlayVisualAnim(UAnimSequence* Anim, bool bLoop)
 
 void AEnemyBase::UpdateVisualAnim()
 {
+	// Jump-back dodge holds the Back_Jump one-shot while airborne/recovering.
+	if (AIState == EEnemyAIState::Dodge)
+	{
+		if (VisDodge)
+		{
+			PlayVisualAnim(VisDodge.Get(), false);
+		}
+		else if (VisRun)
+		{
+			PlayVisualAnim(VisRun.Get(), true); // movement-only fallback if kit has no Dodge anim
+		}
+		return;
+	}
 	// Attack-ish states hold a one-shot swing/cast; everything else follows velocity.
 	if (AIState == EEnemyAIState::Windup || AIState == EEnemyAIState::Lunge ||
 		AIState == EEnemyAIState::SpecialWindup || AIState == EEnemyAIState::SpecialBurst)
@@ -425,12 +469,6 @@ void AEnemyBase::UpdateVisualAnim()
 		UAnimSequence* Swing = bCasting ? (VisCast ? VisCast.Get() : VisAttack.Get())
 		                                : (VisAttack ? VisAttack.Get() : VisCast.Get());
 		PlayVisualAnim(Swing, false);
-		return;
-	}
-	// Floaters (F3 ranged): idle/float pose only — never walk/run while drifting.
-	if (bFloats)
-	{
-		PlayVisualAnim(VisIdle ? VisIdle.Get() : VisWalk.Get(), true);
 		return;
 	}
 	const float Speed = GetVelocity().Size2D();
@@ -465,6 +503,15 @@ void AEnemyBase::Tick(float DeltaTime)
 	if (!PC) return;
 	APawn* Player = PC->GetPawn();
 	if (!Player) return;
+
+	DodgeCooldownTimer = FMath::Max(0.0f, DodgeCooldownTimer - DeltaTime);
+
+	// Active jump-back — exclusive until the dodge window ends.
+	if (AIState == EEnemyAIState::Dodge)
+	{
+		TickDodge(DeltaTime, Player);
+		return;
+	}
 
 	// Jump if player is significantly above us — but only if close enough horizontally
 	// and only after a cooldown, so we don't bunny-hop endlessly under ledges.
@@ -573,24 +620,34 @@ void AEnemyBase::TickMelee(float DeltaTime, APawn* Player)
 	{
 	case EEnemyAIState::Approach:
 	{
-		// Approach via a flank point — multiple enemies spread out instead of bee-lining
-		const FVector FlankPoint = ComputeFlankPoint(Player);
+		// Pressure dodge: player in face during approach → jump back (not only chase).
+		if (Dist < DodgeTriggerRange && TryBeginDodge(Player, /*bFromPlayerHit*/ false))
+		{
+			break;
+		}
+
+		// Flankers circle to the player's BACK; others use ring slots for pack spread.
+		const FVector FlankPoint = (MeleeRole == EMeleeRole::Flanker)
+			? ComputeBehindFlankPoint(Player)
+			: ComputeFlankPoint(Player);
 		if (PathRefreshTimer <= 0.0f || !bHasNavTarget)
 		{
-			// Once we're in the final approach band, beeline straight at the PLAYER instead of
-			// orbiting a flank point — otherwise a stationary target never gets closed on.
 			const float DistToFlank = FVector::Dist2D(FlankPoint, MyLoc);
-			const bool bFinalApproach = (Dist < LungeTriggerRange * 1.5f);
-			const FVector Destination = (bFinalApproach || DistToFlank < 180.0f) ? PlayerLoc : FlankPoint;
-			// Don't path through lava/venom — stop at the hazard edge and wait (Sahar playtest).
+			// Flankers stay on the back-orbit longer before committing to a frontal lunge.
+			const float CommitMul = (MeleeRole == EMeleeRole::Flanker) ? 1.05f : 1.5f;
+			const bool bFinalApproach = (Dist < LungeTriggerRange * CommitMul);
+			const bool bBehindPlayer = (FVector::DotProduct(
+				(MyLoc - PlayerLoc).GetSafeNormal2D(),
+				(-Player->GetActorForwardVector()).GetSafeNormal2D()) > 0.35f);
+			const bool bFlankerReady = (MeleeRole != EMeleeRole::Flanker) || bBehindPlayer || Dist < LungeTriggerRange * 0.85f;
+			const FVector Destination = (bFinalApproach && bFlankerReady) || DistToFlank < 180.0f
+				? PlayerLoc : FlankPoint;
 			CurrentNavTarget = ComputeNavTarget(AvoidHazardDestination(Destination));
 			bHasNavTarget = true;
 			PathRefreshTimer = PathRefreshInterval;
 		}
 		const FVector MoveDir = (CurrentNavTarget - MyLoc).GetSafeNormal2D();
 		const bool bStandingInHazard = IsPointInActiveHazard(MyLoc);
-		// Refuse any step that would ENTER lava/venom — but if already burning, keep moving
-		// toward the escape nav target (AvoidHazardDestination scramble).
 		const bool bNextStepBurns = !MoveDir.IsNearlyZero()
 			&& IsPointInActiveHazard(MyLoc + MoveDir * 90.0f);
 		const bool bAllowStep = !MoveDir.IsNearlyZero()
@@ -599,36 +656,49 @@ void AEnemyBase::TickMelee(float DeltaTime, APawn* Player)
 		{
 			AddMovementInput(MoveDir, 1.0f);
 		}
-		// Standing in burn: keep scrambling out; don't windup/lunge from inside.
 		if (bStandingInHazard)
 		{
-			bHasNavTarget = false; // force repath out next tick
+			bHasNavTarget = false;
 			break;
 		}
 		if (IsPointInActiveHazard(PlayerLoc) || bNextStepBurns)
 		{
-			break; // player across the burn / next step is lava — wait on this bank
+			break;
 		}
-		// Enter windup once close — frenzied enemies windup faster
 		if (Dist < LungeTriggerRange)
 		{
+			// Flanker: slight delay before commit when already behind (readable backstab feel).
+			if (MeleeRole == EMeleeRole::Flanker)
+			{
+				const bool bBehind = FVector::DotProduct(
+					(MyLoc - PlayerLoc).GetSafeNormal2D(),
+					(-Player->GetActorForwardVector()).GetSafeNormal2D()) > 0.25f;
+				if (!bBehind && Dist > LungeTriggerRange * 0.7f)
+				{
+					break; // keep circling; don't frontal-spam
+				}
+			}
 			EnterState(EEnemyAIState::Windup);
-			PlayAttackAnim(); // visible melee wind-up swing
-			const float WindupMul = bIsFrenzied ? FrenzyWindupMultiplier : 1.0f;
-			StateTimer = WindupDuration * WindupMul * GetTellDurationMult(); // Feverdream shortens tells
+			PlayAttackAnim();
+			float WindupMul = 1.0f;
+			if (bIsFrenzied)
+			{
+				WindupMul = (MeleeRole == EMeleeRole::Tank) ? TankFrenzyWindupMultiplier : FrenzyWindupMultiplier;
+			}
+			StateTimer = WindupDuration * WindupMul * GetTellDurationMult();
 			RefreshColor();
-			UE_LOG(LogLoopedAI, Verbose, TEXT("Enemy WINDUP (frenzied=%d, dur=%.2f)"), bIsFrenzied ? 1 : 0, StateTimer);
+			UE_LOG(LogLoopedAI, Verbose, TEXT("Enemy WINDUP role=%d frenzied=%d dur=%.2f"),
+				(int32)MeleeRole, bIsFrenzied ? 1 : 0, StateTimer);
 		}
 		break;
 	}
 	case EEnemyAIState::Windup:
 	{
-		// Hold still during windup; player gets a tell
 		StateTimer -= DeltaTime;
 		if (StateTimer <= 0.0f)
 		{
 			EnterState(EEnemyAIState::Lunge);
-			StateTimer = LungeMaxDuration; // drive until contact, capped by this window
+			StateTimer = LungeMaxDuration;
 			RefreshSpeed();
 			RefreshColor();
 		}
@@ -636,7 +706,6 @@ void AEnemyBase::TickMelee(float DeltaTime, APawn* Player)
 	}
 	case EEnemyAIState::Lunge:
 	{
-		// Never lunge through / into an active hazard — abort to Approach and hold the edge.
 		const FVector LungeDir = (PlayerLoc - MyLoc).GetSafeNormal2D();
 		const bool bLungeIntoHazard = IsPointInActiveHazard(PlayerLoc)
 			|| (!LungeDir.IsNearlyZero() && IsPointInActiveHazard(MyLoc + LungeDir * 120.0f));
@@ -646,33 +715,33 @@ void AEnemyBase::TickMelee(float DeltaTime, APawn* Player)
 			bHasNavTarget = false;
 			break;
 		}
-		// Drive STRAIGHT at the player for the whole lunge window (only on safe ground).
 		if (!LungeDir.IsNearlyZero() && !bLungeIntoHazard)
 		{
 			AddMovementInput(LungeDir, 1.0f);
 		}
 		StateTimer -= DeltaTime;
 
-		// Apply contact damage if we make contact during the lunge
 		bool bHitThisLunge = false;
 		if (Dist < MeleeContactRange && bCanMeleeHit)
 		{
 			if (ALoopedCharacter* LC = Cast<ALoopedCharacter>(Player))
 			{
-				LC->TakeDamageFromEnemy(MeleeDamage);
+				const float Dmg = MeleeDamage * GetHeroCopyOutgoingDamageMult();
+				LC->TakeDamageFromEnemy(Dmg);
+				ApplyHeroCopyDeckOnHit(LC);
 				bCanMeleeHit = false;
 				bHitThisLunge = true;
 				GetWorldTimerManager().SetTimer(MeleeTimerHandle, this, &AEnemyBase::MeleeCooldownReset, MeleeHitCooldown, false);
 			}
 		}
 
-		// End the lunge the instant we connect, or when the window closes — whichever comes
-		// first. Record the outcome so Recover knows whether to back off or press back in.
 		if (bHitThisLunge || StateTimer <= 0.0f)
 		{
 			bLungeConnected = bHitThisLunge;
 			EnterState(EEnemyAIState::Recover);
-			StateTimer = RecoverDuration;
+			// Whiff punish: Regular/Tank stay open longer after a miss.
+			const float RecoverMul = bHitThisLunge ? 1.0f : WhiffRecoverMultiplier;
+			StateTimer = RecoverDuration * RecoverMul;
 			RefreshSpeed();
 			RefreshColor();
 		}
@@ -681,10 +750,8 @@ void AEnemyBase::TickMelee(float DeltaTime, APawn* Player)
 	case EEnemyAIState::Recover:
 	{
 		StateTimer -= DeltaTime;
-		// Recover must not walk into lava/venom either (whiff-press or backpedal).
 		if (bLungeConnected)
 		{
-			// Landed the hit — slight backpedal so it feels less zombie-like.
 			const FVector AwayDir = (MyLoc - PlayerLoc).GetSafeNormal2D();
 			if (!AwayDir.IsNearlyZero() && !IsPointInActiveHazard(MyLoc + AwayDir * 90.0f))
 			{
@@ -693,13 +760,24 @@ void AEnemyBase::TickMelee(float DeltaTime, APawn* Player)
 		}
 		else
 		{
-			// Whiffed — press back IN only on safe ground (never chase across a burn).
-			const FVector TowardDir = (PlayerLoc - MyLoc).GetSafeNormal2D();
-			const bool bPressBurns = IsPointInActiveHazard(PlayerLoc)
-				|| (!TowardDir.IsNearlyZero() && IsPointInActiveHazard(MyLoc + TowardDir * 90.0f));
-			if (!TowardDir.IsNearlyZero() && !bPressBurns)
+			// Whiff: Swarm still presses in; Regular/Tank hold / soft backpedal so player can punish.
+			if (MeleeRole == EMeleeRole::Swarm)
 			{
-				AddMovementInput(TowardDir, 0.6f);
+				const FVector TowardDir = (PlayerLoc - MyLoc).GetSafeNormal2D();
+				const bool bPressBurns = IsPointInActiveHazard(PlayerLoc)
+					|| (!TowardDir.IsNearlyZero() && IsPointInActiveHazard(MyLoc + TowardDir * 90.0f));
+				if (!TowardDir.IsNearlyZero() && !bPressBurns)
+				{
+					AddMovementInput(TowardDir, 0.6f);
+				}
+			}
+			else
+			{
+				const FVector AwayDir = (MyLoc - PlayerLoc).GetSafeNormal2D();
+				if (!AwayDir.IsNearlyZero() && !IsPointInActiveHazard(MyLoc + AwayDir * 90.0f))
+				{
+					AddMovementInput(AwayDir, 0.25f);
+				}
 			}
 		}
 		if (StateTimer <= 0.0f)
@@ -719,7 +797,9 @@ void AEnemyBase::TickMelee(float DeltaTime, APawn* Player)
 	{
 		if (ALoopedCharacter* LC = Cast<ALoopedCharacter>(Player))
 		{
-			LC->TakeDamageFromEnemy(MeleeDamage);
+			const float Dmg = MeleeDamage * GetHeroCopyOutgoingDamageMult();
+			LC->TakeDamageFromEnemy(Dmg);
+			ApplyHeroCopyDeckOnHit(LC);
 			bCanMeleeHit = false;
 			GetWorldTimerManager().SetTimer(MeleeTimerHandle, this, &AEnemyBase::MeleeCooldownReset, MeleeHitCooldown, false);
 		}
@@ -731,24 +811,36 @@ void AEnemyBase::TickRanged(float DeltaTime, APawn* Player)
 	const FVector PlayerLoc = Player->GetActorLocation();
 	const FVector MyLoc = GetActorLocation();
 	const float Dist = FVector::Dist2D(PlayerLoc, MyLoc);
-
-	// Kite movement: pick a desired destination based on distance band
-	FVector DesiredDest = MyLoc;
 	const FVector ToPlayer = (PlayerLoc - MyLoc).GetSafeNormal2D();
+
+	// Under melee pressure: jump-back dodge (shared system), then hard kite away.
+	if (Dist < DodgeTriggerRange && TryBeginDodge(Player, /*bFromPlayerHit*/ false))
+	{
+		return;
+	}
+
+	// Kite movement: prefer clear LOS hold points; flee hard when chased.
+	FVector DesiredDest = MyLoc;
+	const bool bHasLOSNow = HasLineOfSightTo(Player);
 
 	if (Dist < KiteMinDist)
 	{
-		// Back away
-		DesiredDest = MyLoc - ToPlayer * KiteBackpedalDistance;
+		// Player chasing — RUN AWAY (stronger than soft backpedal).
+		DesiredDest = MyLoc - ToPlayer * FMath::Max(KiteBackpedalDistance, 520.0f);
+		bHasNavTarget = false; // repath every refresh while fleeing
 	}
 	else if (Dist > KiteMaxDist)
 	{
-		// Close in (path-aware)
 		DesiredDest = PlayerLoc;
+	}
+	else if (!bHasLOSNow)
+	{
+		// In band but blocked — reposition to a spot with clear line to the player.
+		DesiredDest = FindLOSHoldPoint(Player);
 	}
 	else
 	{
-		// In band — strafe sideways
+		// Clear LOS in band — soft strafe while holding the angle.
 		KiteStrafeTimer -= DeltaTime;
 		if (KiteStrafeTimer <= 0.0f)
 		{
@@ -756,7 +848,7 @@ void AEnemyBase::TickRanged(float DeltaTime, APawn* Player)
 			KiteStrafeTimer = KiteStrafeChangeInterval + FMath::FRandRange(-0.3f, 0.5f);
 		}
 		const FVector SideDir = FVector::CrossProduct(FVector::UpVector, ToPlayer).GetSafeNormal2D();
-		DesiredDest = MyLoc + SideDir * KiteStrafeSign * KiteStrafeDistance;
+		DesiredDest = MyLoc + SideDir * KiteStrafeSign * (KiteStrafeDistance * 0.65f);
 	}
 
 	// Guard post: defend home instead of chasing. Every kite decision is clamped inside the guard
@@ -776,20 +868,21 @@ void AEnemyBase::TickRanged(float DeltaTime, APawn* Player)
 
 	if (PathRefreshTimer <= 0.0f || !bHasNavTarget)
 	{
-		// Ranged avoid lava/venom (Sahar softlock) — F3 floaters are the sole exception.
-		const FVector Dest = bCanFloatOverHazards ? DesiredDest : AvoidHazardDestination(DesiredDest);
+		const FVector Dest = AvoidHazardDestination(DesiredDest);
 		CurrentNavTarget = ComputeNavTarget(Dest);
 		bHasNavTarget = true;
-		PathRefreshTimer = PathRefreshInterval;
+		// Flee / seek-LOS refreshes faster so they don't stand and eat melee.
+		PathRefreshTimer = (Dist < KiteMinDist || !bHasLOSNow)
+			? FMath::Min(PathRefreshInterval, 0.18f)
+			: PathRefreshInterval;
 	}
 
 	const FVector MoveDir = (CurrentNavTarget - MyLoc).GetSafeNormal2D();
-	const bool bStandingInHazard = !bCanFloatOverHazards && IsPointInActiveHazard(MyLoc);
-	const bool bNextStepBurns = !bCanFloatOverHazards && !MoveDir.IsNearlyZero()
+	const bool bStandingInHazard = IsPointInActiveHazard(MyLoc);
+	const bool bNextStepBurns = !MoveDir.IsNearlyZero()
 		&& IsPointInActiveHazard(MyLoc + MoveDir * 90.0f);
 	if (bStandingInHazard)
 	{
-		// Scramble out — force repath every tick until clear of the burn.
 		bHasNavTarget = false;
 		if (!MoveDir.IsNearlyZero())
 		{
@@ -798,16 +891,16 @@ void AEnemyBase::TickRanged(float DeltaTime, APawn* Player)
 	}
 	else if (!MoveDir.IsNearlyZero() && !bNextStepBurns)
 	{
-		AddMovementInput(MoveDir, 1.0f);
+		// Flee harder when the player is close.
+		const float MoveScale = (Dist < KiteMinDist) ? 1.0f : 0.85f;
+		AddMovementInput(MoveDir, MoveScale);
 	}
 
-	// Ranged: telegraph then shoot, with line of sight, on a fire-rate cadence
-	const bool bInBand = (Dist < RangedRange && Dist > 200.0f);
+	// Only shoot from a clear LOS position (and not while face-hugged).
+	const bool bInBand = (Dist < RangedRange && Dist > 220.0f);
 	const bool bHasLOS = bInBand && HasLineOfSightTo(Player);
 
-	// Phase 2 teleport — boss snaps to player when they run away. Highest priority so it
-	// preempts Skyfall when both are ready (mobility punish beats damage punish).
-	if (bIsBoss && bIsPhase2 &&
+	if (bIsBoss && !bHeroCopy && bIsPhase2 &&
 		Dist > TeleportTriggerDistance &&
 		GetWorld()->GetTimeSeconds() >= NextTeleportReadyTime)
 	{
@@ -815,8 +908,7 @@ void AEnemyBase::TickRanged(float DeltaTime, APawn* Player)
 		return;
 	}
 
-	// Boss: if the special-attack cooldown elapsed and we have LOS, pivot into windup.
-	if (bIsBoss && bHasLOS && GetWorld()->GetTimeSeconds() >= NextSpecialReadyTime)
+	if (bIsBoss && !bHeroCopy && bHasLOS && GetWorld()->GetTimeSeconds() >= NextSpecialReadyTime)
 	{
 		BeginSpecialAttack();
 		return;
@@ -873,8 +965,7 @@ FVector AEnemyBase::ComputeNavTarget(const FVector& Destination)
 		{
 			const FVector& Pt = Path->PathPoints[i];
 			// Refuse to step into an active hazard along the path (melee + ranged).
-			// Floaters (F3 ranged) skip this — they alone may drift over lava.
-			if (!bCanFloatOverHazards && IsPointInActiveHazard(Pt))
+			if (IsPointInActiveHazard(Pt))
 			{
 				// Return the previous safe point (or stay put).
 				return (i > 1) ? Path->PathPoints[i - 1] : MyLoc;
@@ -887,14 +978,12 @@ FVector AEnemyBase::ComputeNavTarget(const FVector& Destination)
 		return Path->PathPoints.Last();
 	}
 
-	// No usable path (often a Null nav hole over lava). Floaters bee-line; others stop short.
-	return bCanFloatOverHazards ? Destination : AvoidHazardDestination(Destination);
+	// No usable path (often a Null nav hole over lava) — stop short of the burn.
+	return AvoidHazardDestination(Destination);
 }
 
 bool AEnemyBase::IsPointInActiveHazard(const FVector& Point) const
 {
-	// F3 ranged floaters ignore hazard volumes for pathing (visual hover over lava).
-	if (bCanFloatOverHazards) return false;
 	UWorld* World = GetWorld();
 	if (!World) return false;
 	// Inflate XY so AI stop SHORT of the burn (don't toe the lava edge / clip the volume).
@@ -1077,7 +1166,10 @@ void AEnemyBase::RefreshSpeed()
 	}
 
 	float S = BaseSpeed;
-	if (bIsFrenzied)                              S *= FrenzySpeedMultiplier;
+	if (bIsFrenzied)
+	{
+		S *= (MeleeRole == EMeleeRole::Tank) ? TankFrenzySpeedMultiplier : FrenzySpeedMultiplier;
+	}
 	else if (bIsAlerted)                          S *= AlertedSpeedMultiplier;
 	if (VenomTicksRemaining > 0)                  S *= VenomSlowMultiplier;
 	if (AIState == EEnemyAIState::Lunge)          S *= LungeSpeedMultiplier;
@@ -1193,6 +1285,19 @@ void AEnemyBase::TakeDamageFromPlayer(float Damage, AActor* DamageSource)
 	if (EnemyHurtSound)
 	{
 		UGameplayStatics::PlaySoundAtLocation(this, EnemyHurtSound, GetActorLocation());
+	}
+
+	// Jump-back under player attack pressure (melee + ranged share this).
+	if (APawn* AttackerPawn = Cast<APawn>(DamageSource))
+	{
+		TryBeginDodge(AttackerPawn, /*bFromPlayerHit*/ true);
+	}
+	else if (APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr)
+	{
+		if (APawn* P = PC->GetPawn())
+		{
+			TryBeginDodge(P, /*bFromPlayerHit*/ true);
+		}
 	}
 
 	if (ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
@@ -1623,7 +1728,7 @@ void AEnemyBase::MeleeCooldownReset()
 
 void AEnemyBase::RangedAttack()
 {
-	if (!IsAlive()) return;
+	if (!IsAlive() || bHeroCopy) return; // hero-copy: melee/Branch only — never shoot
 
 	APawn* Player = GetWorld()->GetFirstPlayerController()->GetPawn();
 	if (!Player) return;
@@ -1636,7 +1741,7 @@ void AEnemyBase::RangedAttack()
 
 void AEnemyBase::SpawnProjectileAtPlayer(float Damage)
 {
-	if (bFrozen) return; // an in-flight telegraph/burst timer must not fire from a frozen enemy
+	if (bFrozen || bHeroCopy) return; // hero-copy: no projectiles
 
 	APawn* Player = GetWorld()->GetFirstPlayerController() ? GetWorld()->GetFirstPlayerController()->GetPawn() : nullptr;
 	if (!Player) return;
@@ -1706,6 +1811,255 @@ FVector AEnemyBase::ComputeFlankPoint(const APawn* Player) const
 	return PLoc + Offset;
 }
 
+FVector AEnemyBase::ComputeBehindFlankPoint(const APawn* Player) const
+{
+	if (!Player) return GetActorLocation();
+	const FVector PLoc = Player->GetActorLocation();
+	const FVector Back = (-Player->GetActorForwardVector()).GetSafeNormal2D();
+	// Slight left/right bias from flank slot so multiple flankers don't stack.
+	const float SideBias = (FlankSlotIndex % 2 == 0) ? -35.0f : 35.0f;
+	const FVector Side = FVector::CrossProduct(FVector::UpVector, Back).GetSafeNormal2D() * SideBias;
+	const float Radius = FMath::Max(FlankRadius, 380.0f);
+	return PLoc + Back * Radius + Side;
+}
+
+EMeleeRole AEnemyBase::ResolveMeleeRole(FName RowName, const FEnemyTypeData& Row) const
+{
+	if (Row.MeleeRole != EMeleeRole::Auto)
+	{
+		return Row.MeleeRole;
+	}
+	if (Row.bIsRanged && !Row.bHybridMelee)
+	{
+		return EMeleeRole::None;
+	}
+	// Known names (DT may still say Auto until Sahar retags rows in editor).
+	if (RowName == TEXT("Hound"))
+	{
+		return EMeleeRole::Flanker;
+	}
+	if (RowName == TEXT("Rotclaw") || RowName == TEXT("Voidling"))
+	{
+		return EMeleeRole::Swarm;
+	}
+	if (RowName == TEXT("Brute") || RowName == TEXT("Frostbrute"))
+	{
+		return EMeleeRole::Tank;
+	}
+	if (RowName == TEXT("Grunt"))
+	{
+		return EMeleeRole::Regular;
+	}
+	// Hybrids / elites / bosses: keep readable regular melee when they close in.
+	if (Row.bHybridMelee || IsA<ABossBase>())
+	{
+		return EMeleeRole::Regular;
+	}
+	// Scale heuristic: small = swarm, big = tank, else regular.
+	if (Row.Scale <= 0.85f)
+	{
+		return EMeleeRole::Swarm;
+	}
+	if (Row.Scale >= 1.25f)
+	{
+		return EMeleeRole::Tank;
+	}
+	return EMeleeRole::Regular;
+}
+
+void AEnemyBase::ApplyMeleeRoleDefaults(EMeleeRole ResolvedRole)
+{
+	switch (ResolvedRole)
+	{
+	case EMeleeRole::Swarm:
+		LungeTriggerRange = 260.0f;
+		RecoverDuration = 0.28f;
+		WhiffRecoverMultiplier = 1.0f;
+		MeleeHitCooldown = 0.85f;
+		LungeSpeedMultiplier = 2.8f;
+		MeleeContactRange = 130.0f;
+		DodgeCooldown = 2.6f;
+		DodgeChance = 0.28f;
+		DodgeTriggerRange = 200.0f;
+		DodgeDistance = 240.0f;
+		if (WindupDuration > 0.55f) { WindupDuration = 0.40f; }
+		break;
+	case EMeleeRole::Regular:
+		LungeTriggerRange = 320.0f;
+		RecoverDuration = 0.70f;
+		WhiffRecoverMultiplier = 1.45f;
+		MeleeHitCooldown = 1.35f;
+		LungeSpeedMultiplier = 2.0f;
+		MeleeContactRange = 145.0f;
+		DodgeCooldown = 3.0f;
+		DodgeChance = 0.38f;
+		DodgeTriggerRange = 230.0f;
+		DodgeDistance = 280.0f;
+		if (WindupDuration < 0.65f) { WindupDuration = 0.85f; }
+		break;
+	case EMeleeRole::Tank:
+		LungeTriggerRange = 400.0f;
+		RecoverDuration = 1.00f;
+		WhiffRecoverMultiplier = 1.55f;
+		MeleeHitCooldown = 1.80f;
+		LungeSpeedMultiplier = 1.7f;
+		MeleeContactRange = 175.0f;
+		DodgeCooldown = 4.2f;
+		DodgeChance = 0.18f;
+		DodgeTriggerRange = 250.0f;
+		DodgeDistance = 220.0f;
+		if (WindupDuration < 0.95f) { WindupDuration = 1.20f; }
+		break;
+	case EMeleeRole::Flanker:
+		LungeTriggerRange = 240.0f;
+		RecoverDuration = 0.45f;
+		WhiffRecoverMultiplier = 1.15f;
+		MeleeHitCooldown = 1.10f;
+		LungeSpeedMultiplier = 2.4f;
+		MeleeContactRange = 135.0f;
+		FlankRadius = 420.0f;
+		DodgeCooldown = 2.4f;
+		DodgeChance = 0.42f;
+		DodgeTriggerRange = 240.0f;
+		DodgeDistance = 300.0f;
+		if (WindupDuration > 0.55f) { WindupDuration = 0.45f; }
+		break;
+	case EMeleeRole::None:
+	default:
+		// Ranged / unspecified — still dodge under pressure; no melee cadence change.
+		DodgeCooldown = 2.8f;
+		DodgeChance = 0.45f;
+		DodgeTriggerRange = 280.0f;
+		DodgeDistance = 320.0f;
+		DodgeLaunchSpeed = 780.0f;
+		break;
+	}
+}
+
+bool AEnemyBase::TryBeginDodge(APawn* Player, bool bFromPlayerHit)
+{
+	if (!Player || !IsAlive() || bFrozen) return false;
+	if (AIState == EEnemyAIState::Dodge) return false;
+	if (AIState == EEnemyAIState::Windup || AIState == EEnemyAIState::Lunge) return false;
+	if (AIState == EEnemyAIState::SpecialWindup || AIState == EEnemyAIState::SpecialBurst ||
+		AIState == EEnemyAIState::TeleportWindup)
+	{
+		return false;
+	}
+	if (DodgeCooldownTimer > 0.0f) return false;
+	if (!GetCharacterMovement() || !GetCharacterMovement()->IsMovingOnGround()) return false;
+
+	const float Dist = FVector::Dist2D(Player->GetActorLocation(), GetActorLocation());
+	if (!bFromPlayerHit && Dist > DodgeTriggerRange) return false;
+
+	const float Chance = bFromPlayerHit
+		? FMath::Clamp(DodgeChance + 0.25f, 0.0f, 0.85f)
+		: DodgeChance;
+	if (FMath::FRand() > Chance) return false;
+
+	const FVector Away = (GetActorLocation() - Player->GetActorLocation()).GetSafeNormal2D();
+	if (Away.IsNearlyZero()) return false;
+
+	const FVector Probe = GetActorLocation() + Away * 120.0f;
+	if (IsPointInActiveHazard(Probe) || IsPointInActiveHazard(GetActorLocation() + Away * DodgeDistance * 0.5f))
+	{
+		return false; // never jump-back into lava
+	}
+
+	DodgeMoveDir = Away;
+	EnterState(EEnemyAIState::Dodge);
+	StateTimer = DodgeDuration;
+	DodgeCooldownTimer = DodgeCooldown;
+	bHasNavTarget = false;
+
+	// Cancel an in-flight ranged telegraph so they don't shoot mid-dodge.
+	if (bTelegraphInFlight)
+	{
+		GetWorldTimerManager().ClearTimer(TelegraphTimerHandle);
+		bTelegraphInFlight = false;
+		RefreshColor();
+	}
+	if (GetWorldTimerManager().IsTimerActive(RangedTimerHandle))
+	{
+		GetWorldTimerManager().ClearTimer(RangedTimerHandle);
+	}
+
+	LaunchCharacter(FVector(Away.X * DodgeLaunchSpeed, Away.Y * DodgeLaunchSpeed, DodgeLaunchZ), true, true);
+	if (bVisualDriven && VisDodge)
+	{
+		CurrentVisAnim = nullptr; // force replay
+		PlayVisualAnim(VisDodge.Get(), false);
+	}
+	UE_LOG(LogLoopedAI, Verbose, TEXT("%s DODGE (hit=%d role=%d)"), *GetName(), bFromPlayerHit ? 1 : 0, (int32)MeleeRole);
+	return true;
+}
+
+void AEnemyBase::TickDodge(float DeltaTime, APawn* Player)
+{
+	StateTimer -= DeltaTime;
+	if (!DodgeMoveDir.IsNearlyZero())
+	{
+		const FVector Step = GetActorLocation() + DodgeMoveDir * 90.0f;
+		if (!IsPointInActiveHazard(Step))
+		{
+			AddMovementInput(DodgeMoveDir, 1.0f);
+		}
+	}
+	if (StateTimer <= 0.0f)
+	{
+		EnterState(bIsRanged && !bMeleeEngaged ? EEnemyAIState::Kite : EEnemyAIState::Approach);
+		bHasNavTarget = false;
+		RefreshSpeed();
+	}
+}
+
+FVector AEnemyBase::FindLOSHoldPoint(const APawn* Player) const
+{
+	if (!Player) return GetActorLocation();
+	const FVector MyLoc = GetActorLocation();
+	const FVector PlayerLoc = Player->GetActorLocation();
+	const FVector Away = (MyLoc - PlayerLoc).GetSafeNormal2D();
+	const FVector Side = FVector::CrossProduct(FVector::UpVector, Away).GetSafeNormal2D();
+
+	UNavigationSystemV1* NavSys = UNavigationSystemV1::GetCurrent(GetWorld());
+	const float PreferDist = FMath::Clamp(FVector::Dist2D(MyLoc, PlayerLoc), KiteMinDist, KiteMaxDist);
+
+	// Sample ring around preferred kite distance; pick first nav-projected point with LOS.
+	static const float Angles[] = { 0.f, 40.f, -40.f, 80.f, -80.f, 120.f, -120.f, 160.f, -160.f, 180.f };
+	for (float Ang : Angles)
+	{
+		const FRotator R(0.f, Ang, 0.f);
+		const FVector Dir = R.RotateVector(Away.IsNearlyZero() ? FVector::ForwardVector : Away);
+		FVector Candidate = PlayerLoc + Dir * PreferDist + Side * (Ang * 1.5f);
+		Candidate.Z = MyLoc.Z;
+		if (IsPointInActiveHazard(Candidate)) continue;
+
+		if (NavSys)
+		{
+			FNavLocation Projected;
+			if (NavSys->ProjectPointToNavigation(Candidate, Projected, FVector(400.f, 400.f, 600.f)))
+			{
+				Candidate = Projected.Location;
+			}
+		}
+		if (IsPointInActiveHazard(Candidate)) continue;
+
+		// Temporary LOS check from candidate height toward player.
+		const FVector Start = Candidate + FVector(0, 0, 60.0f);
+		const FVector End = PlayerLoc;
+		FHitResult Hit;
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(EnemyLOSSeek), false, this);
+		Params.AddIgnoredActor(Player);
+		const bool bBlocked = GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params);
+		if (!bBlocked)
+		{
+			return Candidate;
+		}
+	}
+	// Fallback: just back away from the player on safe ground.
+	return AvoidHazardDestination(MyLoc + Away * 400.0f);
+}
+
 void AEnemyBase::CheckEnterFrenzy()
 {
 	if (bIsFrenzied) return;
@@ -1743,7 +2097,7 @@ float AEnemyBase::GetTellDurationMult() const
 
 void AEnemyBase::CheckEnterPhase2()
 {
-	if (bIsPhase2 || !bIsBoss) return;
+	if (bIsPhase2 || !bIsBoss || bHeroCopy) return; // hero-copy stays a pure melee mirror
 	if (GetHealthPercent() > Phase2HPThreshold) return;
 
 	bIsPhase2 = true;
@@ -1921,7 +2275,7 @@ void AEnemyBase::FireTelegraphedShot()
 
 void AEnemyBase::BeginSpecialAttack()
 {
-	if (!IsAlive()) return;
+	if (!IsAlive() || bHeroCopy) return;
 
 	// Stop normal-ranged firing while in special
 	GetWorldTimerManager().ClearTimer(RangedTimerHandle);
@@ -2032,6 +2386,152 @@ void AEnemyBase::DeathPop()
 					UE_LOG(LogLoopedAI, Display, TEXT("Volatile death pop hit the PLAYER for %.0f"), GI->CurseVolatileSelfDamage);
 				}
 			}
+		}
+	}
+}
+
+void AEnemyBase::ApplyHeavyImpact(const FVector& FromDirection, float KnockbackSpeed)
+{
+	if (!IsAlive() || bFrozen) return;
+	if (bIsBoss) return; // bosses hold their ground — the heavy still pays via HeavyDamageMult
+
+	const FVector Dir = FromDirection.GetSafeNormal2D();
+	if (Dir.IsNearlyZero()) return;
+
+	// Never punt an enemy into lava/venom — a heavy must not hand out free hazard kills.
+	if (IsPointInActiveHazard(GetActorLocation() + Dir * 240.0f)) return;
+
+	// Interrupt a wound-up attack: the heavy is the answer to melee pressure.
+	if (AIState == EEnemyAIState::Windup || AIState == EEnemyAIState::Lunge)
+	{
+		bLungeConnected = false;
+		EnterState(EEnemyAIState::Recover);
+		StateTimer = RecoverDuration * FMath::Max(1.0f, WhiffRecoverMultiplier);
+		RefreshSpeed();
+		RefreshColor();
+	}
+
+	LaunchCharacter(FVector(Dir.X * KnockbackSpeed, Dir.Y * KnockbackSpeed, 160.0f), true, true);
+	UE_LOG(LogLoopedAI, Verbose, TEXT("%s knocked back by HEAVY (speed=%.0f)"), *GetName(), KnockbackSpeed);
+}
+
+void AEnemyBase::SetupAsHeroCopy()
+{
+	bHeroCopy = true;
+	bIsBoss = true;
+	bIsRanged = false;
+	bHybridMelee = false;
+	bIsPhase2 = false;
+	AIState = EEnemyAIState::Approach;
+
+	// Snapshot the player's deck at fight start — cards only (no relics / blessings).
+	HeroCopyDeck.Reset();
+	if (const ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
+	{
+		HeroCopyDeck = GI->RunDeck;
+	}
+
+	VisualRowOverride = FName(TEXT("Hero"));
+	ApplyEnemyVisual(FName(TEXT("Hero")));
+	AttachHeroCopyBranch();
+
+	BaseSpeed = MoveSpeed;
+	RefreshSpeed();
+	RefreshColor();
+
+	UE_LOG(LogLoopedAI, Display, TEXT("%s: SetupAsHeroCopy — melee mirror, deck=%d cards, Branch attached."),
+		*GetName(), HeroCopyDeck.Num());
+}
+
+void AEnemyBase::AttachHeroCopyBranch()
+{
+	if (!HeldWeaponMesh || !GetMesh()) return;
+
+	UStaticMesh* Branch = LoadObject<UStaticMesh>(nullptr, TEXT("/Game/Weapons/Branch/SM_Branch.SM_Branch"));
+	if (!Branch)
+	{
+		UE_LOG(LogLoopedAI, Warning, TEXT("%s: HeroCopy Branch mesh missing at /Game/Weapons/Branch/SM_Branch"), *GetName());
+		return;
+	}
+
+	HeldWeaponMesh->AttachToComponent(GetMesh(), FAttachmentTransformRules::SnapToTargetNotIncludingScale, HeldWeaponSocket);
+	HeldWeaponMesh->SetStaticMesh(Branch);
+	HeldWeaponMesh->SetVisibility(true);
+	HeldWeaponMesh->SetCastShadow(false);
+	NormalizeHeldWeaponTransform();
+	if (GetWorld())
+	{
+		GetWorldTimerManager().SetTimer(HeldWeaponNormalizeTimerHandle, this,
+			&AEnemyBase::NormalizeHeldWeaponTransform, 0.25f, false);
+	}
+}
+
+void AEnemyBase::NormalizeHeldWeaponTransform()
+{
+	if (!HeldWeaponMesh || !GetMesh() || !HeldWeaponMesh->GetStaticMesh()) return;
+	const FTransform SocketT = GetMesh()->GetSocketTransform(HeldWeaponSocket);
+	HeldWeaponMesh->SetWorldScale3D(HeldWeaponWorldScale);
+	HeldWeaponMesh->SetWorldLocation(SocketT.GetLocation() + SocketT.TransformVectorNoScale(HeldWeaponGripOffset));
+}
+
+float AEnemyBase::GetHeroCopyOutgoingDamageMult() const
+{
+	if (!bHeroCopy) return 1.0f;
+	float Mult = 1.0f;
+	for (const FPassiveSlot& Slot : HeroCopyDeck)
+	{
+		if (Slot.IsEmpty() || Slot.Level <= 0) continue;
+		const FPassiveCardData& Card = Slot.CachedData;
+		if (!Card.Levels.IsValidIndex(Slot.Level - 1)) continue;
+		const FPassiveCardLevel& Lv = Card.Levels[Slot.Level - 1];
+		if (Slot.CardRowName == FName(TEXT("GlassCannon")) || Slot.CardRowName == FName(TEXT("Overcharge"))
+			|| Slot.CardRowName == FName(TEXT("WoundMemory")))
+		{
+			// Overcharge: copy is "untouched" at fight start — apply while copy is near full HP.
+			if (Slot.CardRowName == FName(TEXT("Overcharge")) && GetHealthPercent() < 0.999f) continue;
+			Mult *= 1.0f + Lv.Fraction;
+		}
+	}
+	return Mult;
+}
+
+void AEnemyBase::ApplyHeroCopyDeckOnHit(ALoopedCharacter* Player)
+{
+	if (!bHeroCopy || !Player || !Player->IsAlive()) return;
+
+	const FGameplayTag TagBurn      = FGameplayTag::RequestGameplayTag(FName("Effect.Burn"), false);
+	const FGameplayTag TagVenom     = FGameplayTag::RequestGameplayTag(FName("Effect.Venom"), false);
+	const FGameplayTag TagLifesteal = FGameplayTag::RequestGameplayTag(FName("Effect.Lifesteal"), false);
+	const FGameplayTag TagCryo      = FGameplayTag::RequestGameplayTag(FName("Effect.Cryo"), false);
+
+	for (const FPassiveSlot& Slot : HeroCopyDeck)
+	{
+		if (Slot.IsEmpty() || Slot.Level <= 0) continue;
+		const FPassiveCardData& Card = Slot.CachedData;
+		if (!Card.Levels.IsValidIndex(Slot.Level - 1)) continue;
+		const FPassiveCardLevel& Lv = Card.Levels[Slot.Level - 1];
+		const FGameplayTagContainer& CardTags = Card.EffectTags;
+
+		if (CardTags.HasTagExact(TagBurn))
+		{
+			Player->ApplyElementalStatus(FName(TEXT("Burn")), Lv.Damage, FMath::Max(1.0f, (float)Lv.Ticks));
+		}
+		else if (CardTags.HasTagExact(TagVenom))
+		{
+			Player->ApplyElementalStatus(FName(TEXT("Venom")), Lv.Damage, FMath::Max(1.0f, (float)Lv.Ticks));
+			if (Lv.SlowMultiplier < 1.0f)
+			{
+				Player->ApplyElementalStatus(FName(TEXT("Slow")), Lv.SlowMultiplier, FMath::Max(1.0f, (float)Lv.Ticks));
+			}
+		}
+		else if (CardTags.HasTagExact(TagLifesteal))
+		{
+			CurrentHealth = FMath::Min(MaxHealthCached, CurrentHealth + Lv.HealAmount);
+		}
+		else if (CardTags.HasTagExact(TagCryo))
+		{
+			// Mirror Frostbite as a short chill on the player (no full freeze — keep fight fair).
+			Player->ApplyElementalStatus(FName(TEXT("Slow")), 0.55f, FMath::Max(0.5f, Lv.FreezeDuration));
 		}
 	}
 }

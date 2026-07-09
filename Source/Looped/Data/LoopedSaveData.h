@@ -145,6 +145,10 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")
 	int32 SchemaVersion = 1;
 
+	// First-launch tutorial finished (sphere home / Done). Hub skips auto-route to L_Tutorial.
+	UPROPERTY(BlueprintReadOnly, Category = "LOOPED|Stats")
+	bool bTutorialCompleted = false;
+
 	static constexpr const TCHAR* SlotName = TEXT("LoopedPlayer");
 	static constexpr int32 UserIndex = 0;
 };

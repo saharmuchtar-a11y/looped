@@ -22,6 +22,8 @@ public:
 	// (a DT_ProjectileElements RowName) sets the orb's color + a damage multiplier (color by class).
 	void Init(float InDamage, float InSpeed, FName InElementId = FName(TEXT("None")));
 
+	virtual void Tick(float DeltaTime) override;
+
 protected:
 	UPROPERTY(VisibleAnywhere, Category = "Projectile")
 	TObjectPtr<USphereComponent> Collision;
@@ -42,6 +44,10 @@ protected:
 	FName StatusEffect = NAME_None;
 	float StatusMagnitude = 0.0f;
 	float StatusDuration = 0.0f;
+
+	// Watchdog: destroy if velocity collapses (stuck mid-air soft-collision hang).
+	float StuckSeconds = 0.0f;
+	bool bDestroying = false;
 
 	// Blocking world hit (wall/prop) — die so geometry acts as cover.
 	UFUNCTION()

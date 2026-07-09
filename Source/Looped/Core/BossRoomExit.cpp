@@ -1,6 +1,7 @@
 #include "BossRoomExit.h"
 #include "Enemies/EnemyBase.h"
 #include "Core/LoopedRunGameMode.h"
+#include "Core/LoopedGameInstance.h"
 #include "Kismet/GameplayStatics.h"
 #include "EngineUtils.h"
 #include "Looped.h"
@@ -35,7 +36,20 @@ void ABossRoomExit::HandleEnemyDied(AEnemyBase* Enemy)
 	bPortalSpawned = true;
 	if (ALoopedRunGameMode* GM = Cast<ALoopedRunGameMode>(UGameplayStatics::GetGameMode(this)))
 	{
+		// Final floor: run is over — Echoes already paid in HandleBossDied / no "?" mark.
+		// Mid-floor / placed-enemy arenas still get the strong-fight pedestal.
+		bool bFinal = false;
+		if (const ULoopedGameInstance* GI = GetGameInstance<ULoopedGameInstance>())
+		{
+			bFinal = GI->IsFinalFloor();
+		}
+		if (!bFinal)
+		{
+			GM->SpawnBossRewardPedestal();
+		}
 		GM->SpawnHubPortal(PortalDestination);
-		UE_LOG(LogLoopedRun, Display, TEXT("BossRoomExit: portal -> %s spawned"), *PortalDestination.ToString());
+		UE_LOG(LogLoopedRun, Display, TEXT("BossRoomExit: %sportal -> %s spawned"),
+			bFinal ? TEXT("final (no mark) + ") : TEXT("reward + "),
+			*PortalDestination.ToString());
 	}
 }

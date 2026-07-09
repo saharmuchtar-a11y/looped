@@ -15,6 +15,7 @@
 #include "NiagaraComponent.h"
 #include "NiagaraSystem.h"
 #include "Core/LoopedGameInstance.h"
+#include "Player/LoopedCharacter.h"
 #include "Data/RoomRouting.h"
 #include "Looped.h"
 
@@ -90,8 +91,6 @@ APortalActor::APortalActor()
 	PortalLight->SetAttenuationRadius(500.0f);
 	PortalLight->SetLightColor(PortalLightColor);
 	PortalLight->SetCastShadows(false);
-
-	TriggerBox->OnComponentBeginOverlap.AddDynamic(this, &APortalActor::OnOverlapBegin);
 }
 
 void APortalActor::BeginPlay()
@@ -128,14 +127,15 @@ void APortalActor::BeginPlay()
 
 void APortalActor::SetPortalEnabled(bool bEnabled)
 {
+	bPortalEnabled = bEnabled;
 	if (PortalMesh)
 	{
 		PortalMesh->SetVisibility(bEnabled);
 	}
 	if (TriggerBox)
 	{
-		// Off = no overlap events + no collision; On = restore the Trigger query collision.
-		TriggerBox->SetGenerateOverlapEvents(bEnabled);
+		// Keep a query volume so FindBestInteractable can still see the portal when enabled.
+		TriggerBox->SetGenerateOverlapEvents(false);
 		TriggerBox->SetCollisionEnabled(bEnabled ? ECollisionEnabled::QueryOnly : ECollisionEnabled::NoCollision);
 	}
 	if (!bEnabled && LabelComp)
@@ -225,19 +225,22 @@ void APortalActor::SetForkType(FName InRoomTypeId)
 	UE_LOG(LogLoopedRun, Display, TEXT("[Portal] Fork type set to '%s'."), *InRoomTypeId.ToString());
 }
 
-void APortalActor::OnOverlapBegin(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
-	UPrimitiveComponent* OtherComp, int32 OtherBodyIndex,
-	bool bFromSweep, const FHitResult& SweepResult)
+FText APortalActor::GetInteractPrompt() const
 {
-	if (!OtherActor) return;
+	if (!bPortalEnabled || bTraveling) return FText::GetEmpty();
+	if (Mode == ERoutePortalMode::StartRun) return FText::FromString(TEXT("enter the loop"));
+	if (!RoomTypeId.IsNone()) return FText::FromString(TEXT("take this path"));
+	return FText::FromString(TEXT("step through"));
+}
 
-	// Accept only a player-controlled pawn.
-	APawn* Pawn = Cast<APawn>(OtherActor);
-	if (!Pawn || !Pawn->IsPlayerControlled()) return;
+void APortalActor::Interact(ALoopedCharacter* /*Player*/)
+{
+	TryCommitTravel();
+}
 
-	// Already mid-fade from a prior overlap — ignore. Critical: NextRoom resolution advances the
-	// run path index, so a double-fire here would skip a room.
-	if (bTraveling) return;
+bool APortalActor::TryCommitTravel()
+{
+	if (!bPortalEnabled || bTraveling) return false;
 
 	// A fork portal (type assigned at runtime via SetForkType) wins over the editor Mode: it loads a
 	// random level of its type and records the room. Otherwise fall back to the Mode behaviour.
@@ -250,12 +253,11 @@ void APortalActor::OnOverlapBegin(UPrimitiveComponent* OverlappedComp, AActor* O
 		}
 		if (Destination.IsNone())
 		{
-			UE_LOG(LogLoopedRun, Warning, TEXT("[Portal] Fork type '%s' resolved no level — overlap ignored."), *RoomTypeId.ToString());
-			return;
+			UE_LOG(LogLoopedRun, Warning, TEXT("[Portal] Fork type '%s' resolved no level — interact ignored."), *RoomTypeId.ToString());
+			return false;
 		}
-		// Skip the Mode switch entirely for typed fork portals.
 		BeginTravel(Destination);
-		return;
+		return true;
 	}
 
 	// Resolve the destination by mode. StartRun/NextRoom query the GameInstance run path;
@@ -282,11 +284,12 @@ void APortalActor::OnOverlapBegin(UPrimitiveComponent* OverlappedComp, AActor* O
 
 	if (Destination.IsNone())
 	{
-		UE_LOG(LogLoopedRun, Warning, TEXT("[Portal] No destination resolved (Mode=%d) — overlap ignored."), (int32)Mode);
-		return;
+		UE_LOG(LogLoopedRun, Warning, TEXT("[Portal] No destination resolved (Mode=%d) — interact ignored."), (int32)Mode);
+		return false;
 	}
 
 	BeginTravel(Destination);
+	return true;
 }
 
 void APortalActor::BeginTravel(FName Destination)

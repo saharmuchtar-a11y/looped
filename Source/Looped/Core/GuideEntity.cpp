@@ -271,16 +271,38 @@ FString AGuideEntity::BuildPage(int32 PageIndex) const
 			}
 		}
 		break;
-	case 3: // Blessings — only ones you have held; Relics — only ones you own
-	case 4:
+	case 3: // Blessings — names (+ rarity) only; Sahar: too much text on the list
 		if (UDataTable* T = LoadObject<UDataTable>(nullptr, TEXT("/Game/Data/DT_Artifacts.DT_Artifacts")))
 		{
-			const EArtifactScope Want = (PageIndex == 3) ? EArtifactScope::Run : EArtifactScope::Permanent;
 			for (const FName& Row : T->GetRowNames())
 			{
 				const FArtifactData* A = T->FindRow<FArtifactData>(Row, TEXT("Guide"), false);
-				if (!A || A->Scope != Want) continue;
-				const bool bKnown = GI && ((PageIndex == 3) ? GI->IsBlessingSeen(Row) : GI->HasArtifact(Row));
+				if (!A || A->Scope != EArtifactScope::Run) continue;
+				const bool bKnown = GI && GI->IsBlessingSeen(Row);
+				if (bKnown)
+				{
+					const TCHAR* Rarity =
+						(A->Rarity == ECardRarity::Epic) ? TEXT("Epic") :
+						(A->Rarity == ECardRarity::Rare) ? TEXT("Rare") :
+						(A->Rarity == ECardRarity::Cursed) ? TEXT("Cursed") : TEXT("Common");
+					Out += FString::Printf(TEXT("%s  [%s]%s\n"), *A->DisplayName.ToString(), Rarity,
+						A->bIsCursed ? TEXT("  [CURSED]") : TEXT(""));
+				}
+				else
+				{
+					Out += GLockedLine;
+				}
+			}
+		}
+		break;
+	case 4: // Relics — only ones you own (keep short desc)
+		if (UDataTable* T = LoadObject<UDataTable>(nullptr, TEXT("/Game/Data/DT_Artifacts.DT_Artifacts")))
+		{
+			for (const FName& Row : T->GetRowNames())
+			{
+				const FArtifactData* A = T->FindRow<FArtifactData>(Row, TEXT("Guide"), false);
+				if (!A || A->Scope != EArtifactScope::Permanent) continue;
+				const bool bKnown = GI && GI->HasArtifact(Row);
 				if (bKnown)
 				{
 					Out += FString::Printf(TEXT("%s%s\n    %s\n\n"), *A->DisplayName.ToString(),

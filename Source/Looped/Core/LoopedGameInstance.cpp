@@ -133,8 +133,15 @@ void ULoopedGameInstance::LoadOrCreateStats()
 		 Stats->Echoes > 0 || Stats->UnlockedCards.Num() > 0 || Stats->OwnedArtifacts.Num() > 0))
 	{
 		Stats->OwnedArtifacts.Add(TEXT("Orin"));
+		Stats->bTutorialCompleted = true; // they already played — don't force the corridor again
 		SaveStats();
 		UE_LOG(LogLoopedCore, Display, TEXT("[Stats] Legacy save migrated — Orin (Arm Monitor) granted."));
+	}
+	// Orin owned but flag never set (pre-flag saves that finished tutorial): treat as complete.
+	if (Stats->OwnedArtifacts.Contains(TEXT("Orin")) && !Stats->bTutorialCompleted)
+	{
+		Stats->bTutorialCompleted = true;
+		SaveStats();
 	}
 
 	// Consistency repair: Mira owned but fragments short (a cheat-grant predating the
@@ -706,9 +713,70 @@ void ULoopedGameInstance::ResetShards()
 	CurrentRunState.Shards = 0;
 }
 
+void ULoopedGameInstance::SkipToFloor3BossCheat(int32 ForceHeroCopy)
+{
+	CurrentFloor = MaxFloors; // Floor 3 = final
+	CachedFloorBossForFloor = 0;
+	CachedFloorBossRow = NAME_None;
+
+	if (ForceHeroCopy == 1)
+	{
+		CachedFloorBossForFloor = CurrentFloor;
+		CachedFloorBossRow = Floor3HeroCopyBossRow.IsNone() ? FName(TEXT("HeroCopy")) : Floor3HeroCopyBossRow;
+		UE_LOG(LogLoopedCore, Display, TEXT("[Cheat] SkipToFloor3Boss — forcing HeroCopy."));
+	}
+	else if (ForceHeroCopy == 2)
+	{
+		CachedFloorBossForFloor = CurrentFloor;
+		CachedFloorBossRow = FName(TEXT("TheLooped"));
+		UE_LOG(LogLoopedCore, Display, TEXT("[Cheat] SkipToFloor3Boss — forcing TheLooped."));
+	}
+	else
+	{
+		UE_LOG(LogLoopedCore, Display, TEXT("[Cheat] SkipToFloor3Boss — Floor 3 roll (%.0f%% HeroCopy)."),
+			Floor3HeroCopyChance * 100.0f);
+	}
+
+	UGameplayStatics::OpenLevel(this, FName(TEXT("L_FinalBoss")));
+}
+
 void ULoopedGameInstance::AddShardsCheat(int32 Amount)
 {
 	AddShards(Amount);
+}
+
+bool ULoopedGameInstance::TryCasinoWager(int32 Wager)
+{
+	if (Wager <= 0) return false;
+	if (!SpendShards(Wager)) return false;
+	CurrentRunState.CasinoShardsWagered += Wager;
+	return true;
+}
+
+float ULoopedGameInstance::GetCasinoPayoutScale() const
+{
+	// Soft diminishing returns after ~200 wagered this run; hard floor so wins still feel real.
+	const float Spent = static_cast<float>(CurrentRunState.CasinoShardsWagered);
+	const float Scale = 1.0f / (1.0f + Spent / 200.0f);
+	return FMath::Clamp(Scale, 0.35f, 1.0f);
+}
+
+void ULoopedGameInstance::ResetCasinoSpend()
+{
+	CurrentRunState.CasinoShardsWagered = 0;
+}
+
+void ULoopedGameInstance::MarkTutorialCompleted()
+{
+	if (!Stats || Stats->bTutorialCompleted) return;
+	Stats->bTutorialCompleted = true;
+	SaveStats();
+	UE_LOG(LogLoopedCore, Display, TEXT("[Tutorial] Marked complete — Hub will skip auto-route."));
+}
+
+bool ULoopedGameInstance::HasCompletedTutorial() const
+{
+	return Stats && Stats->bTutorialCompleted;
 }
 
 void ULoopedGameInstance::WipeSave()
@@ -1006,6 +1074,10 @@ void ULoopedGameInstance::EvaluateUnlocksAfterStatChange()
 	TryUnlock(TEXT("Overcharge"),  Stats->RoomClears >= 25);
 	TryUnlock(TEXT("Executioner"), Stats->TotalEnemyKills >= 300);
 	TryUnlock(TEXT("GlassCannon"), Stats->BossKills >= 3);
+
+	// Melee-charge combat cards (2026-07-09): Agility (LoopCadence) + Strength (WoundMemory) are from-start
+	// (bRequiresUnlock=false). Fist of Steel (FoldedBreath) unlocks early so charge-feel cards show in treasure soon.
+	TryUnlock(TEXT("FoldedBreath"), Stats->RoomClears >= 3);
 
 	// Epic cards.
 	// Speed is unlocked ONLY by a fast run (see AddRunCompleted / FastRunUnlockSeconds) — Sahar's call.
@@ -1470,6 +1542,8 @@ FName ULoopedGameInstance::BeginRunPath()
 	CurrentPathIndex = -1;
 	RunRoomsEntered = 0;
 	CurrentFloor = 1; // every run starts the descent from the top
+	CachedFloorBossForFloor = 0;
+	CachedFloorBossRow = NAME_None;
 
 	// Stamp the run-start wall clock so AddRunCompleted can time the whole run (survives OpenLevel).
 	RunStartRealTime = FPlatformTime::Seconds();
@@ -1721,13 +1795,42 @@ float ULoopedGameInstance::GetFloorDamageMult() const { return FloorKnob(FloorDa
 FName ULoopedGameInstance::GetFloorBossRow() const
 {
 	if (FloorBossRows.Num() == 0) return NAME_None;
-	return FloorBossRows[FMath::Clamp(CurrentFloor - 1, 0, FloorBossRows.Num() - 1)];
+
+	// Stable for the floor — GameMode / HUD may query more than once.
+	if (CachedFloorBossForFloor == CurrentFloor && !CachedFloorBossRow.IsNone())
+	{
+		return CachedFloorBossRow;
+	}
+
+	FName Chosen = FloorBossRows[FMath::Clamp(CurrentFloor - 1, 0, FloorBossRows.Num() - 1)];
+
+	// Floor 3: X% chance the final boss is the player's melee mirror (hero mesh + Branch + deck).
+	if (CurrentFloor >= 3 && Floor3HeroCopyChance > 0.0f && !Floor3HeroCopyBossRow.IsNone())
+	{
+		if (FMath::FRand() < Floor3HeroCopyChance)
+		{
+			Chosen = Floor3HeroCopyBossRow;
+			UE_LOG(LogLoopedCore, Display, TEXT("[Floors] Floor 3 boss roll → HeroCopy (%.0f%%)."),
+				Floor3HeroCopyChance * 100.0f);
+		}
+		else
+		{
+			UE_LOG(LogLoopedCore, Display, TEXT("[Floors] Floor 3 boss roll → %s (HeroCopy missed)."),
+				*Chosen.ToString());
+		}
+	}
+
+	CachedFloorBossForFloor = CurrentFloor;
+	CachedFloorBossRow = Chosen;
+	return Chosen;
 }
 
 FName ULoopedGameInstance::BeginNextFloor()
 {
 	CurrentFloor = FMath::Clamp(CurrentFloor + 1, 1, MaxFloors);
 	RunRoomsEntered = 0; // the new floor's boss gate re-arms; forks continue as normal
+	CachedFloorBossForFloor = 0;
+	CachedFloorBossRow = NAME_None; // re-roll when this floor's boss is needed
 	UE_LOG(LogLoopedCore, Display, TEXT("[Floors] Descending — floor %d begins (%d rooms to its boss)."),
 		CurrentFloor, GetFloorRunLength());
 	// Land in a fight: draw the floor's opener from the Combat pool. EnterRoomType appends the

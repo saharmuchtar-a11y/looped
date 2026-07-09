@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Core/LoopedInteractable.h"
 #include "PortalActor.generated.h"
 
 class UStaticMeshComponent;
@@ -24,12 +25,18 @@ enum class ERoutePortalMode : uint8
 };
 
 UCLASS(Blueprintable)
-class LOOPED_API APortalActor : public AActor
+class LOOPED_API APortalActor : public AActor, public ILoopedInteractable
 {
 	GENERATED_BODY()
 
 public:
 	APortalActor();
+
+	// Press-E to travel (Sahar: run entry was too easy to walk into by accident).
+	// Overlap alone no longer starts travel — stand near + press E.
+	virtual void Interact(class ALoopedCharacter* Player) override;
+	virtual float GetInteractRange() const override { return 280.0f; }
+	virtual FText GetInteractPrompt() const override;
 
 	// Used only when Mode == Fixed.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Portal")
@@ -88,6 +95,9 @@ protected:
 	// Toggles mesh visibility + trigger collision together. Used by BeginPlay + ActivatePortal.
 	void SetPortalEnabled(bool bEnabled);
 
+	// True while the portal is visible / interactable (set by SetPortalEnabled).
+	bool bPortalEnabled = true;
+
 	UPROPERTY(VisibleAnywhere)
 	TObjectPtr<UBoxComponent> TriggerBox;
 
@@ -107,10 +117,9 @@ protected:
 	UPROPERTY(VisibleAnywhere, Category = "Portal|FX")
 	TObjectPtr<UPointLightComponent> PortalLight;
 
-	UFUNCTION()
-	void OnOverlapBegin(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
-		UPrimitiveComponent* OtherComp, int32 OtherBodyIndex,
-		bool bFromSweep, const FHitResult& SweepResult);
+	// Resolves destination (fork / StartRun / NextRoom / Fixed) and begins travel.
+	// Shared by Interact (press-E). Returns false if no destination / already traveling / disabled.
+	bool TryCommitTravel();
 
 	// Seconds to fade to black before the level swap. Tuned to comfortably cover the OpenLevel hitch.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Portal")

@@ -51,7 +51,7 @@ ATreasureChest::ATreasureChest()
 	TriggerBox->SetCollisionProfileName(TEXT("Trigger"));
 	TriggerBox->OnComponentBeginOverlap.AddDynamic(this, &ATreasureChest::OnOverlapBegin);
 
-	// Shared UI button sound, played when the reward is taken (Sahar's request).
+	// Shared UI button click when the reward is taken (original placeholder path).
 	static ConstructorHelpers::FObjectFinder<USoundBase> ButtonSnd(TEXT("/Game/Audio/button.button"));
 	if (ButtonSnd.Succeeded()) PickupSound = ButtonSnd.Object;
 }
@@ -60,6 +60,26 @@ void ATreasureChest::BeginPlay()
 {
 	Super::BeginPlay();
 	RollOffer();
+}
+
+void ATreasureChest::ApplyQuestionMarkRewardVisual()
+{
+	bDespawnWhenTaken = true;
+	if (UStaticMesh* QMark = LoadObject<UStaticMesh>(nullptr,
+		TEXT("/Game/new_assets/question_mark/StaticMeshes/question_mark.question_mark")))
+	{
+		if (PedestalMesh)
+		{
+			PedestalMesh->SetStaticMesh(QMark);
+			PedestalMesh->SetRelativeScale3D(FVector(1.0f, 1.0f, 1.0f));
+			PedestalMesh->SetRelativeLocation(FVector(0.0f, 0.0f, 40.0f));
+			PedestalMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		}
+	}
+	if (FloatingWidgetComp)
+	{
+		FloatingWidgetComp->SetRelativeLocation(FVector(0.0f, 0.0f, 180.0f));
+	}
 }
 
 void ATreasureChest::RollOffer()
@@ -228,14 +248,29 @@ void ATreasureChest::AcceptPedestal()
 		// portal BeginPlay race wiped them (or the player only looks after the pick), re-open now.
 		GI->ActivateRoomExitPortals();
 	}
-	OfferName        = FText::FromString(TEXT("TAKEN"));
-	OfferDescription = FText::FromString(TEXT("Acquired"));
-	CurseWarningText = FText::GetEmpty();
-	PushOfferTextToWidget();
 	if (TriggerBox)
 	{
 		TriggerBox->SetGenerateOverlapEvents(false);
 	}
+
+	// Boss/elite "?" mark: vanish mesh + floating label after the claim (Sahar).
+	if (bDespawnWhenTaken)
+	{
+		if (PedestalMesh) PedestalMesh->SetVisibility(false, true);
+		if (FloatingWidgetComp)
+		{
+			FloatingWidgetComp->SetVisibility(false, true);
+			FloatingWidgetComp->SetHiddenInGame(true);
+		}
+		SetActorEnableCollision(false);
+		SetActorHiddenInGame(true);
+		return;
+	}
+
+	OfferName        = FText::FromString(TEXT("TAKEN"));
+	OfferDescription = FText::FromString(TEXT("Acquired"));
+	CurseWarningText = FText::GetEmpty();
+	PushOfferTextToWidget();
 }
 
 void ATreasureChest::LockPedestal()

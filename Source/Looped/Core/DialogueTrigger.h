@@ -196,7 +196,8 @@ private:
 
 	// --- Fight events (EDialogueOutcome::StartFight) ---
 	// Spawns Count enemies of the DT_Enemies archetype around the trigger once the dialogue closes.
-	// Exit portals stay locked until every spawned enemy is dead; winning pays artifact + shards.
+	// Exit portals stay locked until every spawned enemy is dead. OnFightWon grants the "?" pedestal
+	// only when the fight row has FEnemyTypeData::bGrantsBossReward (champion/miniboss); packs just open exits.
 	void SpawnFight();
 	UFUNCTION() void OnFightEnemyDied(class AEnemyBase* Enemy);
 	void OnFightWon();
@@ -204,7 +205,7 @@ private:
 	// Finishing a talk opens the room's exits — UNLESS the level has enemies placed in it that
 	// weren't spawned by a dialogue fight (a combat event). In that case keep exits locked and
 	// open them only when the last of those dies. No wager reward — this is just the gate, so it
-	// stays separate from the OnFightWon() wager path.
+	// stays separate from the OnFightWon() reward path.
 	void OpenExitsOrGateOnRoomEnemies();
 	UFUNCTION() void OnRoomEnemyDied(class AEnemyBase* Enemy);
 	int32 RoomEnemiesAlive = 0;

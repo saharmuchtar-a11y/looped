@@ -48,6 +48,19 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Treasure")
 	void AcceptPedestal();
 
+	// Re-roll the displayed offer (used when RewardType is set after SpawnActor/BeginPlay).
+	UFUNCTION(BlueprintCallable, Category = "Treasure")
+	void RerollOffer() { RollOffer(); }
+
+	// Boss / elite / champion fight reward: swap the cube for Sahar's question_mark GLB and
+	// despawn mesh + floating tag when claimed (treasure-room chests keep the chest look).
+	UFUNCTION(BlueprintCallable, Category = "Treasure")
+	void ApplyQuestionMarkRewardVisual();
+
+	// When true, AcceptPedestal hides mesh + offer text (and disables collision) instead of "TAKEN".
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Treasure")
+	bool bDespawnWhenTaken = false;
+
 protected:
 	virtual void BeginPlay() override;
 
@@ -96,7 +109,7 @@ private:
 	bool bTaken = false;
 	bool bLocked = false;
 
-	// Played when the player takes this pedestal's reward (the shared UI button sound). Loaded by path.
+	// Played when the player takes this pedestal's reward (/Game/Audio/button).
 	UPROPERTY()
 	TObjectPtr<class USoundBase> PickupSound;
 };

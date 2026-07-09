@@ -255,6 +255,12 @@ public:
 	// player SEES the hit (melee = Attack anim, ranged = the rifle-charge in the Cast slot).
 	void PlayHeroAttackAnim(bool bMelee);
 
+	// Hold-M2 charge feedback: 0 = idle, 1 = full heavy ready. Swells POV Branch + slight FOV pull.
+	void SetMeleeChargeVisual(float Alpha01);
+
+	// Heavier slash arc + longer swing window when WeaponHolder commits a heavy.
+	void NotifyHeavyMeleeSwing();
+
 	// --- POV stick mode (alive = Branch on camera only; death = Meshy body). Flip false to
 	// revert to classic Manny-in-hand. Safe revert path — assets stay in the project.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|POV")
@@ -323,6 +329,9 @@ private:
 
 	float BreathPhase = 0.0f;
 	float POVSwingElapsed = -1.0f; // <0 = idle; else seconds into the swing
+	float MeleeChargeVisual = 0.0f; // 0..1 while holding M2 for heavy
+	float BaseCameraFOV = 90.0f;
+	bool bHeavySwingPending = false;
 	FTimerHandle DeathRagdollTimerHandle;
 
 public:
@@ -396,12 +405,13 @@ public:
 	// camera because it jitters the camera's relative LOCATION (rotation is control-driven).
 	void AddCameraShake(float Intensity);
 
+	// POV Branch slash / classic unarmed montage. WeaponHolder calls this on committed swings.
+	UFUNCTION(BlueprintCallable, Category = "LOOPED|Anim")
+	void PlayRandomAttackAnim();
+
 protected:
 	float CameraShakeAmount = 0.0f;
 	FVector BaseCameraRelLoc = FVector(0.0f, 0.0f, 60.0f);
-
-	UFUNCTION(BlueprintCallable, Category = "LOOPED|Anim")
-	void PlayRandomAttackAnim();
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<ULoopedAbilitySystemComponent> AbilitySystemComponent;
@@ -497,7 +507,7 @@ protected:
 	float BrannPlateDamageMult = 0.9f;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Movement")
-	float JumpHeight = 150.0f;
+	float JumpHeight = 95.0f; // nerfed base (was 150) — Gravity/Speed cards still lift feel
 
 private:
 	void Move(const FInputActionValue& Value);

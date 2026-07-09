@@ -45,6 +45,9 @@ public:
 	// first room. Unlike SpawnHubPortal this does NOT end the run path (the descent continues it).
 	void SpawnDescentPortal(FName Destination);
 
+	// Post-boss "?" pedestal (blessing OR cards). Call before / with the exit portal.
+	void SpawnBossRewardPedestal();
+
 	UFUNCTION(BlueprintPure, Category = "LOOPED|Run")
 	int32 GetCurrentRoom() const { return CurrentRoomIndex; }
 

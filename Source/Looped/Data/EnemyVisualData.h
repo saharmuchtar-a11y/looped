@@ -37,6 +37,10 @@ struct FEnemyVisualSet : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Visual")
 	TSoftObjectPtr<UAnimSequence> Death;
 
+	// Jump-back / dodge (Meshy Back_Jump kits). Optional — missing = movement-only dodge still works.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Visual")
+	TSoftObjectPtr<UAnimSequence> Dodge;
+
 	// Mesh transform relative to the capsule. Meshy exports: centered pivot -> drop by the
 	// capsule half-height; model front lines up at yaw 270 (the Vorr rule).
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Visual")
@@ -49,10 +53,9 @@ struct FEnemyVisualSet : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Visual")
 	float MeshScale = 1.0f;
 
-	// Floater kit (F3 ranged / Hexweaver): no walk/run locomotion, mesh raised + bobbed,
-	// and EnemyBase grants bCanFloatOverHazards so they alone may path over lava/venom.
-	// NOTE: DT row names are floor roles — F3_Ranged uses floor2ranged Hexweaver assets (and
-	// F2_Ranged uses rangedfloor3 Gearbound). Folder names do NOT match the floor role.
+	// DEPRECATED (Sahar 2026-07-09): float presentation reversed — no one floats above lava.
+	// Fields kept so DT_EnemyVisuals still loads; ApplyEnemyVisual ignores them.
+	// NOTE: F3_Ranged still uses floor2ranged Hexweaver assets (F2↔F3 folder swap).
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Visual|Float")
 	bool bFloats = false;
 

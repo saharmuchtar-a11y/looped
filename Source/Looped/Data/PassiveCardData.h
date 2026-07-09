@@ -36,7 +36,8 @@ struct FPassiveCardLevel
 	UPROPERTY(EditAnywhere, BlueprintReadOnly) float FreezeDuration = 0.0f; // frostbite: seconds frozen solid at full chill stacks
 	UPROPERTY(EditAnywhere, BlueprintReadOnly) int32 EchoInterval   = 0;    // echo: every Nth hit re-triggers the effect chain
 	// Generic percent knob (0.10 = +10%). Interpreted by the card's mechanic: Rupture/Executioner/
-	// HuntersMark/Overcharge/GlassCannon damage bonus, Momentum speed burst, etc.
+	// HuntersMark/Overcharge/GlassCannon/Strength(WoundMemory) damage bonus, Momentum speed burst,
+	// Agility(LoopCadence) light-recovery cut, Fist of Steel(FoldedBreath) charge-time cut, etc.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly) float Fraction       = 0.0f;
 	// Generic threshold fraction (0.25 = 25%). Interpreted by the mechanic (Executioner HP gate).
 	UPROPERTY(EditAnywhere, BlueprintReadOnly) float Threshold      = 0.0f;

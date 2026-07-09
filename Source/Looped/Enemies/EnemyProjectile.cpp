@@ -13,7 +13,7 @@
 
 AEnemyProjectile::AEnemyProjectile()
 {
-	PrimaryActorTick.bCanEverTick = false;
+	PrimaryActorTick.bCanEverTick = true; // watchdog for stuck mid-air shots
 	InitialLifeSpan = 4.0f; // self-clean if it never hits anything
 
 	Collision = CreateDefaultSubobject<USphereComponent>(TEXT("Collision"));
@@ -50,6 +50,30 @@ AEnemyProjectile::AEnemyProjectile()
 	Movement->MaxSpeed = 1800.0f;
 	Movement->bRotationFollowsVelocity = true;
 	Movement->ProjectileGravityScale = 0.0f; // straight shot, dodge by strafing
+	Movement->bShouldBounce = false;
+	Movement->bForceSubStepping = true;
+	Movement->MaxSimulationTimeStep = 0.05f;
+}
+
+void AEnemyProjectile::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
+	if (!Movement || bDestroying) return;
+
+	const FVector Vel = Movement->Velocity;
+	if (Vel.SizeSquared() < 100.0f) // ~10 uu/s — effectively frozen
+	{
+		StuckSeconds += DeltaTime;
+		if (StuckSeconds > 0.15f)
+		{
+			bDestroying = true;
+			Destroy();
+		}
+	}
+	else
+	{
+		StuckSeconds = 0.0f;
+	}
 }
 
 void AEnemyProjectile::Init(float InDamage, float InSpeed, FName InElementId)
@@ -84,8 +108,11 @@ void AEnemyProjectile::Init(float InDamage, float InSpeed, FName InElementId)
 	{
 		Movement->InitialSpeed = InSpeed;
 		Movement->MaxSpeed = InSpeed;
+		Movement->SetUpdatedComponent(Collision);
 		Movement->Velocity = GetActorForwardVector() * InSpeed;
+		Movement->UpdateComponentVelocity();
 	}
+	StuckSeconds = 0.0f;
 
 	// Pass straight through the FIRER's own collision. Mooks have no-collision cubes, but the BOSS
 	// uses a BlockAllDynamic proxy for melee hits — without this its own body blocks/destroys the
