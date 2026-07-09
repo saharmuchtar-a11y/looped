@@ -102,6 +102,15 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|MeleeCharge", meta = (ClampMin = "0.0"))
 	float HeavyKnockbackSpeed = 420.0f;
 
+	// Release inside this window right after the charge completes = PERFECT heavy (bonus damage,
+	// harder knockback, deeper thunk). Scales with Fist of Steel's charge cut. Overholding into
+	// auto-fire is always a normal heavy — the reward is for timing, not waiting.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|MeleeCharge", meta = (ClampMin = "0.0"))
+	float PerfectReleaseWindow = 0.15f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|MeleeCharge", meta = (ClampMin = "1.0"))
+	float PerfectDamageBonus = 1.25f;
+
 private:
 	void FireWeapon();
 	void PerformMeleeAttack();
@@ -144,7 +153,9 @@ private:
 	bool bNextSwingHeavy = false;
 	float NextSwingRangeMult = 1.0f;
 	float NextMeleeRecovery = 0.4f;
-	int32 LightChainCount = 0; // consecutive lights in the current chain (fatigue counter)
+	int32 LightChainCount = 0;      // consecutive lights in the current chain (fatigue counter)
+	bool bChargeReadyCued = false;  // "heavy ready" pop fired for the current charge
+	bool bNextSwingPerfect = false; // released inside the perfect window
 
 	// Combat SFX (loaded by path in BeginPlay). Swoosh on every swing, impact on a connecting hit.
 	UPROPERTY()

@@ -204,6 +204,7 @@ void UWeaponHolderComponent::BeginMeleeCharge()
 	// recovery still commit nothing (CommitMeleeSwing eats releases before the clock starts).
 	MeleeChargeStartTime = FMath::Max(Now, LastMeleeTime + FMath::Max(0.05f, NextMeleeRecovery));
 	bMeleeCharging = true;
+	bChargeReadyCued = false;
 	SetComponentTickEnabled(true);
 
 	if (ALoopedCharacter* LC = Cast<ALoopedCharacter>(GetOwner()))
@@ -250,11 +251,22 @@ void UWeaponHolderComponent::CommitMeleeSwing(bool bHeavy)
 	}
 
 	bNextSwingHeavy = bHeavy;
+	// Perfect release: let go inside the window right after the charge completed. Auto-fire
+	// commits land past the window by construction (auto headroom 0.20 > window 0.15; both
+	// scale with Fist of Steel's charge cut, so the card can't turn overholds into perfects).
+	const float EffCharge = GetEffectiveHeavyChargeTime();
+	const float WindowScale = EffCharge / FMath::Max(0.05f, HeavyChargeTime);
+	bNextSwingPerfect = bHeavy
+		&& ((Now - MeleeChargeStartTime) <= EffCharge + PerfectReleaseWindow * WindowScale);
 	NextSwingRangeMult = bHeavy ? HeavyRangeMult : 1.0f;
 	float Recovery = bHeavy ? GetEffectiveHeavyRecovery() : GetEffectiveLightRecovery();
 	if (!bHeavy && LightChainCount > LightChainFreeSwings)
 	{
 		Recovery *= FMath::Max(1.0f, LightFatigueMultiplier); // tired arms — spam pays for itself
+		if (ALoopedCharacter* TiredLC = Cast<ALoopedCharacter>(GetOwner()))
+		{
+			TiredLC->NotifyFatiguedSwing(); // droopy arc — the anti-spam must READ on screen
+		}
 	}
 	NextMeleeRecovery = Recovery;
 	LastMeleeTime = Now;
@@ -270,11 +282,14 @@ void UWeaponHolderComponent::CommitMeleeSwing(bool bHeavy)
 	FireWeapon();
 	bIsFiring = bWasFiring;
 
-	bNextSwingHeavy = false;
-	NextSwingRangeMult = 1.0f;
+	UE_LOG(LogLoopedWeapons, Display, TEXT("Melee %s%s (chain=%d recovery=%.2f)"),
+		bHeavy ? TEXT("HEAVY") : TEXT("light"),
+		bNextSwingPerfect ? TEXT(" PERFECT") : TEXT(""),
+		LightChainCount, NextMeleeRecovery);
 
-	UE_LOG(LogLoopedWeapons, Display, TEXT("Melee %s (recovery=%.2f)"),
-		bHeavy ? TEXT("HEAVY") : TEXT("light"), NextMeleeRecovery);
+	bNextSwingHeavy = false;
+	bNextSwingPerfect = false;
+	NextSwingRangeMult = 1.0f;
 }
 
 void UWeaponHolderComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
@@ -290,6 +305,16 @@ void UWeaponHolderComponent::TickComponent(float DeltaTime, ELevelTick TickType,
 	if (ALoopedCharacter* LC = Cast<ALoopedCharacter>(GetOwner()))
 	{
 		LC->SetMeleeChargeVisual(Alpha);
+		// One-shot release cue the instant the heavy unlocks — Branch pop + a sharp tick.
+		if (!bChargeReadyCued && Held >= ChargeT)
+		{
+			bChargeReadyCued = true;
+			LC->NotifyHeavyReady();
+			if (SwooshSound)
+			{
+				UGameplayStatics::PlaySound2D(this, SwooshSound, 0.45f, 1.65f);
+			}
+		}
 	}
 
 	// Full charge: auto-commit heavy so holding forever isn't a stall.
@@ -337,6 +362,10 @@ float UWeaponHolderComponent::ComputeAttackDamage(bool& bOutCrit) const
 	if (bNextSwingHeavy)
 	{
 		OutDamage *= HeavyDamageMult;
+		if (bNextSwingPerfect)
+		{
+			OutDamage *= FMath::Max(1.0f, PerfectDamageBonus); // timed release pays extra
+		}
 	}
 
 	// Crit roll: Deadeye card chance (Brittle-adjusted) + the Whetstone blessing's flat bonus.
@@ -416,7 +445,7 @@ void UWeaponHolderComponent::PerformMeleeAttack()
 				// on-hit dodge roll, so the knockback owns the moment (bosses shrug it off).
 				if (bNextSwingHeavy && HeavyKnockbackSpeed > 0.0f)
 				{
-					Enemy->ApplyHeavyImpact(Forward, HeavyKnockbackSpeed);
+					Enemy->ApplyHeavyImpact(Forward, HeavyKnockbackSpeed * (bNextSwingPerfect ? 1.35f : 1.0f));
 				}
 				Enemy->TakeDamageFromPlayer(OutDamage, Owner);
 				bConnected = true;
@@ -440,13 +469,24 @@ void UWeaponHolderComponent::PerformMeleeAttack()
 		}
 	}
 
-	// Impact feedback ONCE per swing that connected: thunk sound. (No camera shake on landing a hit —
-	// the enemy's red hit-flash already reads the connect clearly. Shake is kept for TAKING damage.)
+	// Impact feedback ONCE per swing that connected. Lights keep the plain thunk + enemy red
+	// flash (deliberately no shake inflation on every poke); a HEAVY that lands gets the full
+	// weight package: deeper/louder thunk, micro hitstop, small camera kick — perfect most of all.
 	if (bConnected)
 	{
 		if (ImpactSound)
 		{
-			UGameplayStatics::PlaySoundAtLocation(this, ImpactSound, Owner->GetActorLocation());
+			const float Vol   = bNextSwingHeavy ? (bNextSwingPerfect ? 1.35f : 1.20f) : 1.0f;
+			const float Pitch = bNextSwingHeavy ? (bNextSwingPerfect ? 0.70f : 0.80f) : 1.0f;
+			UGameplayStatics::PlaySoundAtLocation(this, ImpactSound, Owner->GetActorLocation(), Vol, Pitch);
+		}
+		if (bNextSwingHeavy)
+		{
+			if (ALoopedCharacter* HeavyLC = Cast<ALoopedCharacter>(Owner))
+			{
+				HeavyLC->DoMeleeHitstop(bNextSwingPerfect ? 0.09f : 0.06f);
+				HeavyLC->AddCameraShake(bNextSwingPerfect ? 1.0f : 0.7f);
+			}
 		}
 	}
 }

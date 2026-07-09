@@ -226,6 +226,47 @@ void ALoopedCharacter::NotifyHeavyMeleeSwing()
 	POVSwingDuration = 0.32f;
 }
 
+void ALoopedCharacter::NotifyHeavyReady()
+{
+	HeavyReadyPulse = 1.0f; // decays fast in UpdatePOVStick — a pop, not a state
+}
+
+void ALoopedCharacter::NotifyFatiguedSwing()
+{
+	bFatiguedSwingPending = true;
+	POVSwingDuration = 0.34f; // lazy, tired arc
+}
+
+void ALoopedCharacter::DoMeleeHitstop(float RealSeconds)
+{
+	UWorld* World = GetWorld();
+	if (!World || RealSeconds <= 0.0f) return;
+
+	// Never fight the Q chrono skill / menu slow-mo — the SloMoManager owns dilation there.
+	if (const USloMoManager* SloMo = World->GetSubsystem<USloMoManager>())
+	{
+		if (SloMo->IsSlowMo()) return;
+	}
+	if (!FMath::IsNearlyEqual(UGameplayStatics::GetGlobalTimeDilation(World), 1.0f, 0.05f)) return;
+
+	static constexpr float HitstopDilation = 0.12f;
+	UGameplayStatics::SetGlobalTimeDilation(World, HitstopDilation);
+
+	// Timers run on DILATED game time — compensate so the stop lasts RealSeconds of wall time.
+	TWeakObjectPtr<ALoopedCharacter> WeakThis(this);
+	World->GetTimerManager().SetTimer(HitstopTimerHandle, FTimerDelegate::CreateLambda([WeakThis]()
+	{
+		if (!WeakThis.IsValid()) return;
+		UWorld* W = WeakThis->GetWorld();
+		if (!W) return;
+		if (const USloMoManager* SloMo2 = W->GetSubsystem<USloMoManager>())
+		{
+			if (SloMo2->IsSlowMo()) return; // Q fired mid-stop — the manager restores on its own exit
+		}
+		UGameplayStatics::SetGlobalTimeDilation(W, 1.0f);
+	}), RealSeconds * HitstopDilation, false);
+}
+
 void ALoopedCharacter::ApplyPOVStickPose(float SwingAlpha01, float InBreathPhase)
 {
 	if (!WeaponMeshComp || !bPOVStickMode) return;
@@ -244,15 +285,22 @@ void ALoopedCharacter::ApplyPOVStickPose(float SwingAlpha01, float InBreathPhase
 		Rot.Pitch += -8.0f * MeleeChargeVisual; // tip up into view
 	}
 
+	// Ready pop: a quick extra pulse the instant the heavy finishes charging (release cue).
+	if (HeavyReadyPulse > KINDA_SMALL_NUMBER)
+	{
+		Scale *= 1.0f + 0.18f * HeavyReadyPulse;
+	}
+
 	if (SwingAlpha01 > KINDA_SMALL_NUMBER)
 	{
 		// 0→1→0 bell: ease out to peak at mid-swing, ease back to idle.
 		const float Bell = FMath::Sin(SwingAlpha01 * PI);
+		const float ArcScale = bFatiguedSwingPending ? 0.65f : 1.0f; // tired swings droop
 		const FRotator Peak = bHeavySwingPending
 			? FRotator(POVSwingPeakRot.Pitch - 18.0f, POVSwingPeakRot.Yaw, POVSwingPeakRot.Roll + 20.0f)
 			: POVSwingPeakRot;
-		Rot = FMath::Lerp(POVStickIdleRot, Peak, Bell);
-		Loc += FVector(bHeavySwingPending ? 10.0f : 6.0f, -4.0f, 2.0f) * Bell;
+		Rot = FMath::Lerp(POVStickIdleRot, Peak, Bell * ArcScale);
+		Loc += FVector(bHeavySwingPending ? 10.0f : 6.0f, -4.0f, 2.0f) * (Bell * ArcScale);
 	}
 
 	WeaponMeshComp->SetRelativeLocation(Loc);
@@ -265,6 +313,7 @@ void ALoopedCharacter::UpdatePOVStick(float DeltaSeconds)
 	if (!bPOVStickMode || !WeaponMeshComp || bInDeathCam) return;
 
 	BreathPhase += DeltaSeconds * BreathBobSpeed * 2.0f * PI;
+	HeavyReadyPulse = FMath::Max(0.0f, HeavyReadyPulse - DeltaSeconds * 5.0f); // ~0.2s pop
 
 	float SwingA = 0.0f;
 	if (POVSwingElapsed >= 0.0f)
@@ -277,6 +326,7 @@ void ALoopedCharacter::UpdatePOVStick(float DeltaSeconds)
 			POVSwingElapsed = -1.0f;
 			SwingA = 0.0f;
 			bHeavySwingPending = false;
+			bFatiguedSwingPending = false;
 			POVSwingDuration = 0.22f; // restore light slash timing
 		}
 	}

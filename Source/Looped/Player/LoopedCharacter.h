@@ -261,6 +261,16 @@ public:
 	// Heavier slash arc + longer swing window when WeaponHolder commits a heavy.
 	void NotifyHeavyMeleeSwing();
 
+	// One-shot pop on the Branch the instant the heavy charge completes (the release cue).
+	void NotifyHeavyReady();
+
+	// Tired 3rd+ spam swing: slower, shallower slash so the fatigue anti-spam reads on screen.
+	void NotifyFatiguedSwing();
+
+	// Micro time-freeze when a heavy CONNECTS (~60-90ms real time). Skips itself whenever the
+	// SloMoManager owns dilation (Q chrono / menus) so the two systems never fight.
+	void DoMeleeHitstop(float RealSeconds);
+
 	// --- POV stick mode (alive = Branch on camera only; death = Meshy body). Flip false to
 	// revert to classic Manny-in-hand. Safe revert path — assets stay in the project.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|POV")
@@ -332,6 +342,9 @@ private:
 	float MeleeChargeVisual = 0.0f; // 0..1 while holding M2 for heavy
 	float BaseCameraFOV = 90.0f;
 	bool bHeavySwingPending = false;
+	float HeavyReadyPulse = 0.0f;   // 1 -> 0 pop when the charge completes
+	bool bFatiguedSwingPending = false;
+	FTimerHandle HitstopTimerHandle;
 	FTimerHandle DeathRagdollTimerHandle;
 
 public:
