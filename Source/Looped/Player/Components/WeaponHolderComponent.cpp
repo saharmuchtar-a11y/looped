@@ -1,7 +1,6 @@
 #include "WeaponHolderComponent.h"
 #include "PassiveStackComponent.h"
 #include "Enemies/EnemyBase.h"
-#include "Enemies/SimpleEnemy.h"
 #include "Player/LoopedCharacter.h"
 #include "Core/LoopedGameInstance.h"
 #include "Data/PassiveCardData.h"
@@ -465,13 +464,6 @@ void UWeaponHolderComponent::PerformMeleeAttack()
 				}
 				bConnected = true;
 			}
-			ASimpleEnemy* SimpleEnemy = Cast<ASimpleEnemy>(HitActor);
-			if (SimpleEnemy)
-			{
-				SimpleEnemy->TakeDamageFromPlayer(OutDamage, Owner);
-				bConnected = true;
-			}
-
 			if (CachedPassiveStack)
 			{
 				CachedPassiveStack->EvaluatePassives(Hit, CachedWeaponData.PrimaryFamily, HitActor);
