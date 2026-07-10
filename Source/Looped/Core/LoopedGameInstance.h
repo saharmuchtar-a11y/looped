@@ -83,9 +83,6 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "LOOPED|Stats")
 	void AddRunCompleted();
 
-	// Finishing a run faster than this (seconds) unlocks the Speed card. Tunable.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Stats")
-	float FastRunUnlockSeconds = 120.0f;
 
 	// Wall-clock stamp (FPlatformTime::Seconds) of when the current run started. Survives OpenLevel
 	// (the GI persists across travel). Run-scoped, not saved. 0 = no run in progress.

@@ -267,12 +267,9 @@ void ULoopedGameInstance::AddRunCompleted()
 		{
 			Stats->FastestRunSeconds = RunSeconds;
 		}
-		// Speed-run reward: finish under the threshold -> unlock the Speed card.
-		if (RunSeconds > 0.0f && RunSeconds <= FastRunUnlockSeconds)
-		{
-			UE_LOG(LogLoopedCore, Display, TEXT("[Stats] Fast run %.1fs <= %.0fs -> unlocking Speed."), RunSeconds, FastRunUnlockSeconds);
-			UnlockCard(FName(TEXT("Speed")));
-		}
+		// (Speed used to unlock here on a fast run — retired 2026-07-10: the 3-floor descent made
+		// any time threshold unreachable. Speed now unlocks on the first floor-boss kill; the
+		// FastestRunSeconds stat above stays tracked for the monitor.)
 		RunStartRealTime = 0.0; // consumed
 	}
 
@@ -1079,8 +1076,14 @@ void ULoopedGameInstance::EvaluateUnlocksAfterStatChange()
 	// (bRequiresUnlock=false). Fist of Steel (FoldedBreath) unlocks early so charge-feel cards show in treasure soon.
 	TryUnlock(TEXT("FoldedBreath"), Stats->RoomClears >= 3);
 
+	// Cleave (row ChainSpark, 2026-07-10): Epic ONE-PICK — hits arc to nearby enemies and carry
+	// your on-hit effects. Earned by cleaving through enough of them.
+	TryUnlock(TEXT("ChainSpark"), Stats->TotalEnemyKills >= 100);
+
 	// Epic cards.
-	// Speed is unlocked ONLY by a fast run (see AddRunCompleted / FastRunUnlockSeconds) — Sahar's call.
+	// Speed (2026-07-10, Sahar): first floor-boss kill — the old fast-run timer became
+	// impossible once the descent grew to 3 floors. Beat the Gatekeeper, earn your legs.
+	TryUnlock(TEXT("Speed"), Stats->BossKills >= 1);
 	// Gravity is NOT unlocked here — it's gated behind completing the Hub parkour
 	// (ACardUnlockTrigger at the summit calls UnlockCard("Gravity")).
 
