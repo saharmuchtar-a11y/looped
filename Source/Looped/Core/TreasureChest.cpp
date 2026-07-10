@@ -8,6 +8,7 @@
 #include "GameFramework/Pawn.h"
 #include "EngineUtils.h"
 #include "Core/LoopedGameInstance.h"
+#include "Player/LoopedCharacter.h"
 #include "Data/ArtifactData.h"
 #include "Looped.h"
 #include "Engine/Engine.h"
@@ -65,20 +66,24 @@ void ATreasureChest::BeginPlay()
 void ATreasureChest::ApplyQuestionMarkRewardVisual()
 {
 	bDespawnWhenTaken = true;
-	if (UStaticMesh* QMark = LoadObject<UStaticMesh>(nullptr,
-		TEXT("/Game/new_assets/question_mark/StaticMeshes/question_mark.question_mark")))
+	// CHEST, not "?" (Sahar 2026-07-10): the reward must never blend into the event's own
+	// question-mark marker it spawns next to — a chest reads as "claim me" instantly.
+	if (UStaticMesh* Chest = LoadObject<UStaticMesh>(nullptr,
+		TEXT("/Game/new_assets/chest/StaticMeshes/chest.chest")))
 	{
 		if (PedestalMesh)
 		{
-			PedestalMesh->SetStaticMesh(QMark);
-			PedestalMesh->SetRelativeScale3D(FVector(1.0f, 1.0f, 1.0f));
-			PedestalMesh->SetRelativeLocation(FVector(0.0f, 0.0f, 40.0f));
+			PedestalMesh->SetStaticMesh(Chest);
+			PedestalMesh->SetRelativeScale3D(FVector(0.8f, 0.8f, 0.8f));
+			// Meshy exports: centered pivot -> lift by half height; front lines up at yaw -90.
+			PedestalMesh->SetRelativeLocation(FVector(0.0f, 0.0f, 60.0f));
+			PedestalMesh->SetRelativeRotation(FRotator(0.0f, -90.0f, 0.0f));
 			PedestalMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		}
 	}
 	if (FloatingWidgetComp)
 	{
-		FloatingWidgetComp->SetRelativeLocation(FVector(0.0f, 0.0f, 180.0f));
+		FloatingWidgetComp->SetRelativeLocation(FVector(0.0f, 0.0f, 190.0f));
 	}
 }
 
@@ -191,10 +196,23 @@ void ATreasureChest::Interact(ALoopedCharacter* Player)
 	ULoopedGameInstance* GI = GetWorld() ? GetWorld()->GetGameInstance<ULoopedGameInstance>() : nullptr;
 	if (!GI) return;
 
-	// Budget already spent on another pedestal — lock instead of granting.
-	if (!GI->CanPickTreasure()) { LockPedestal(); return; }
+	// Budget already spent on another pedestal — lock instead of granting, and SAY so
+	// (a silent E-press reads as a bug; see the stuck-champion-reward playtest).
+	if (!GI->CanPickTreasure())
+	{
+		LockPedestal();
+		if (Player) Player->ShowCenterMessage(FText::FromString(TEXT("Your pick here is already spent.")), 2.5f);
+		return;
+	}
 
+	const FText ClaimName = OfferName; // captured before AcceptPedestal relabels it
 	AcceptPedestal();
+	if (Player)
+	{
+		Player->ShowCenterMessage(bTaken
+			? FText::FromString(FString::Printf(TEXT("Claimed: %s"), *ClaimName.ToString()))
+			: FText::FromString(TEXT("Nothing to claim here.")), 3.0f);
+	}
 }
 
 void ATreasureChest::AcceptPedestal()
@@ -208,7 +226,18 @@ void ATreasureChest::AcceptPedestal()
 	{
 	case ETreasureRewardType::CleanRelic:
 	case ETreasureRewardType::CursedRelic:
-		if (RolledArtifactId.IsNone()) return;     // nothing to grant; let the player pick elsewhere
+		if (RolledArtifactId.IsNone())
+		{
+			// Boss/champion chest is the ONLY pedestal in its room — "pick elsewhere" would be a
+			// softlock. Blessing pool empty? Pay cards instead; the claim must always succeed.
+			if (bDespawnWhenTaken)
+			{
+				GI->GrantRunCardBundle(2);
+				What = TEXT("2 cards (blessing pool empty)");
+				break;
+			}
+			return; // treasure rooms have sibling pedestals; let the player pick elsewhere
+		}
 		GI->GrantRunArtifact(RolledArtifactId);     // handles cursed-bargain injection
 		What = RolledArtifactId.ToString();
 		break;

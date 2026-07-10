@@ -1046,6 +1046,10 @@ void ADialogueTrigger::OnFightWon()
 		}
 	}
 
+	// The event is SPENT either way — a dead trigger must never eat E-presses again (it sat
+	// under the reward and re-ran the dialogue per press: repeat grants + unclaimable chest).
+	SetInteractionEnabled(false);
+
 	if (!bGrantPedestal)
 	{
 		if (GI)
@@ -1064,7 +1068,14 @@ void ADialogueTrigger::OnFightWon()
 	if (GI)
 	{
 		GI->ResetTreasurePicks();
-		const FVector SpawnLoc = GetActorLocation() + FVector(0.0f, 0.0f, 20.0f);
+		// Spawn the chest OFFSET toward the player — stacked on the trigger, the nearest-actor
+		// interact pick kept choosing the dead dialogue instead of the reward.
+		FVector SpawnLoc = GetActorLocation() + FVector(0.0f, 0.0f, 20.0f);
+		FVector Toward = Player
+			? (Player->GetActorLocation() - GetActorLocation()).GetSafeNormal2D()
+			: GetActorForwardVector().GetSafeNormal2D();
+		if (Toward.IsNearlyZero()) Toward = FVector::ForwardVector;
+		SpawnLoc += Toward * 240.0f;
 		FActorSpawnParameters Params;
 		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 		if (ATreasureChest* Pedestal = GetWorld()->SpawnActor<ATreasureChest>(

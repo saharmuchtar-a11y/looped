@@ -76,7 +76,7 @@ protected:
 
 	// Damage / reach multipliers applied only to a heavy swing (cards still proc on hit).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|MeleeCharge", meta = (ClampMin = "1.0"))
-	float HeavyDamageMult = 2.2f;
+	float HeavyDamageMult = 2.6f; // raised with the 2026-07-10 light buff so heavy stays the sustained winner
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|MeleeCharge", meta = (ClampMin = "1.0"))
 	float HeavyRangeMult = 1.2f;
@@ -89,10 +89,12 @@ protected:
 	// Swings 1..N in a chain come at full speed; every light AFTER that pays extra recovery, so
 	// sustained click-spam DPS drops below a charged-heavy rhythm. Heavies reset the chain.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|MeleeCharge", meta = (ClampMin = "1"))
-	int32 LightChainFreeSwings = 2;
+	int32 LightChainFreeSwings = 3;
 
+	// Softened 2026-07-10 (Sahar: normal fighting felt crippled, not just spam) — the penalty
+	// should tax button-mashing, not honest combat rhythm.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|MeleeCharge", meta = (ClampMin = "1.0"))
-	float LightFatigueMultiplier = 1.9f;
+	float LightFatigueMultiplier = 1.6f;
 
 	// Pause this long between swings and the chain forgives (fatigue resets).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|MeleeCharge", meta = (ClampMin = "0.2"))
