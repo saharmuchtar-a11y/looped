@@ -1070,11 +1070,8 @@ void ADialogueTrigger::OnFightWon()
 		if (ATreasureChest* Pedestal = GetWorld()->SpawnActor<ATreasureChest>(
 			ATreasureChest::StaticClass(), SpawnLoc, FRotator::ZeroRotator, Params))
 		{
-			// 50/50 blessing vs card bundle — treasure-style choice via press-E.
-			Pedestal->RewardType = (FMath::FRand() < 0.5f)
-				? ETreasureRewardType::CleanRelic
-				: ETreasureRewardType::CardBundle;
-			Pedestal->CardBundleCount = 2;
+			// Champion "?" is ALWAYS a blessing (Sahar 2026-07-10) — cards come from treasure/shop.
+			Pedestal->RewardType = ETreasureRewardType::CleanRelic;
 			Pedestal->ApplyQuestionMarkRewardVisual();
 			Pedestal->RerollOffer(); // BeginPlay already rolled with the default type
 		}

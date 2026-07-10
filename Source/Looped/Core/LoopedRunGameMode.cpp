@@ -705,14 +705,11 @@ void ALoopedRunGameMode::SpawnBossRewardPedestal()
 	if (ATreasureChest* Pedestal = GetWorld()->SpawnActor<ATreasureChest>(
 		ATreasureChest::StaticClass(), SpawnLoc, FRotator::ZeroRotator, Params))
 	{
-		Pedestal->RewardType = (FMath::FRand() < 0.5f)
-			? ETreasureRewardType::CleanRelic
-			: ETreasureRewardType::CardBundle;
-		Pedestal->CardBundleCount = 3;
+		// Boss "?" is ALWAYS a blessing (Sahar 2026-07-10) — cards come from treasure rooms/shop.
+		Pedestal->RewardType = ETreasureRewardType::CleanRelic;
 		Pedestal->ApplyQuestionMarkRewardVisual();
 		Pedestal->RerollOffer();
-		UE_LOG(LogLoopedRun, Display, TEXT("Boss reward pedestal spawned (%s)."),
-			Pedestal->RewardType == ETreasureRewardType::CardBundle ? TEXT("cards") : TEXT("blessing"));
+		UE_LOG(LogLoopedRun, Display, TEXT("Boss reward pedestal spawned (blessing)."));
 	}
 }
 
