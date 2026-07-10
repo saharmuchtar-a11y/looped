@@ -2469,9 +2469,11 @@ void AEnemyBase::AttachHeroCopyBranch()
 void AEnemyBase::NormalizeHeldWeaponTransform()
 {
 	if (!HeldWeaponMesh || !GetMesh() || !HeldWeaponMesh->GetStaticMesh()) return;
-	const FTransform SocketT = GetMesh()->GetSocketTransform(HeldWeaponSocket);
-	HeldWeaponMesh->SetWorldScale3D(HeldWeaponWorldScale);
-	HeldWeaponMesh->SetWorldLocation(SocketT.GetLocation() + SocketT.TransformVectorNoScale(HeldWeaponGripOffset));
+	// Pure socket-relative transform (Sahar's hand-placed grip) — the Branch rides the RightHand
+	// bone through every animation instead of being re-seated in world space.
+	HeldWeaponMesh->SetRelativeLocation(HeldWeaponRelLocation);
+	HeldWeaponMesh->SetRelativeRotation(HeldWeaponRelRotation);
+	HeldWeaponMesh->SetRelativeScale3D(HeldWeaponRelScale);
 }
 
 float AEnemyBase::GetHeroCopyOutgoingDamageMult() const

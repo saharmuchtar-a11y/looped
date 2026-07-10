@@ -712,26 +712,28 @@ void ULoopedGameInstance::ResetShards()
 
 void ULoopedGameInstance::SkipToFloor3BossCheat(int32 ForceHeroCopy)
 {
-	CurrentFloor = MaxFloors; // Floor 3 = final
 	CachedFloorBossForFloor = 0;
 	CachedFloorBossRow = NAME_None;
 
 	if (ForceHeroCopy == 1)
 	{
+		// Mirror lives on HeroCopyBossFloor now (default 2) — jump there and force it.
+		CurrentFloor = FMath::Clamp(HeroCopyBossFloor, 1, MaxFloors);
 		CachedFloorBossForFloor = CurrentFloor;
-		CachedFloorBossRow = Floor3HeroCopyBossRow.IsNone() ? FName(TEXT("HeroCopy")) : Floor3HeroCopyBossRow;
-		UE_LOG(LogLoopedCore, Display, TEXT("[Cheat] SkipToFloor3Boss — forcing HeroCopy."));
+		CachedFloorBossRow = HeroCopyBossRow.IsNone() ? FName(TEXT("HeroCopy")) : HeroCopyBossRow;
+		UE_LOG(LogLoopedCore, Display, TEXT("[Cheat] SkipToBoss — forcing HeroCopy on floor %d."), CurrentFloor);
 	}
 	else if (ForceHeroCopy == 2)
 	{
+		CurrentFloor = MaxFloors;
 		CachedFloorBossForFloor = CurrentFloor;
 		CachedFloorBossRow = FName(TEXT("TheLooped"));
-		UE_LOG(LogLoopedCore, Display, TEXT("[Cheat] SkipToFloor3Boss — forcing TheLooped."));
+		UE_LOG(LogLoopedCore, Display, TEXT("[Cheat] SkipToBoss — forcing TheLooped (final)."));
 	}
 	else
 	{
-		UE_LOG(LogLoopedCore, Display, TEXT("[Cheat] SkipToFloor3Boss — Floor 3 roll (%.0f%% HeroCopy)."),
-			Floor3HeroCopyChance * 100.0f);
+		CurrentFloor = MaxFloors; // final floor: always TheLooped now (mirror rolls mid-run)
+		UE_LOG(LogLoopedCore, Display, TEXT("[Cheat] SkipToBoss — final floor (TheLooped)."));
 	}
 
 	UGameplayStatics::OpenLevel(this, FName(TEXT("L_FinalBoss")));
@@ -1807,19 +1809,21 @@ FName ULoopedGameInstance::GetFloorBossRow() const
 
 	FName Chosen = FloorBossRows[FMath::Clamp(CurrentFloor - 1, 0, FloorBossRows.Num() - 1)];
 
-	// Floor 3: X% chance the final boss is the player's melee mirror (hero mesh + Branch + deck).
-	if (CurrentFloor >= 3 && Floor3HeroCopyChance > 0.0f && !Floor3HeroCopyBossRow.IsNone())
+	// HeroCopyBossFloor (default 2): X% chance this floor's boss is the player's melee mirror
+	// (hero mesh + Branch + deck). The FINAL floor never rolls — TheLooped is the canonical end.
+	if (CurrentFloor == HeroCopyBossFloor && CurrentFloor < MaxFloors &&
+		HeroCopyBossChance > 0.0f && !HeroCopyBossRow.IsNone())
 	{
-		if (FMath::FRand() < Floor3HeroCopyChance)
+		if (FMath::FRand() < HeroCopyBossChance)
 		{
-			Chosen = Floor3HeroCopyBossRow;
-			UE_LOG(LogLoopedCore, Display, TEXT("[Floors] Floor 3 boss roll → HeroCopy (%.0f%%)."),
-				Floor3HeroCopyChance * 100.0f);
+			Chosen = HeroCopyBossRow;
+			UE_LOG(LogLoopedCore, Display, TEXT("[Floors] Floor %d boss roll → HeroCopy (%.0f%%)."),
+				CurrentFloor, HeroCopyBossChance * 100.0f);
 		}
 		else
 		{
-			UE_LOG(LogLoopedCore, Display, TEXT("[Floors] Floor 3 boss roll → %s (HeroCopy missed)."),
-				*Chosen.ToString());
+			UE_LOG(LogLoopedCore, Display, TEXT("[Floors] Floor %d boss roll → %s (HeroCopy missed)."),
+				CurrentFloor, *Chosen.ToString());
 		}
 	}
 

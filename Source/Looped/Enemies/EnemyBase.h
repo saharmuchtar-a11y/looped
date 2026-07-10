@@ -464,14 +464,21 @@ private:
 	float GetHeroCopyOutgoingDamageMult() const;
 	FTimerHandle HeldWeaponNormalizeTimerHandle;
 
+	// Hero rig is a Meshy/Mixamo-style skeleton — the bone is "RightHand" (NOT Manny's "hand_r";
+	// the old name silently attached the Branch to the mesh root, floating at the pelvis).
 	UPROPERTY(EditAnywhere, Category = "LOOPED|HeroCopy")
-	FName HeldWeaponSocket = FName(TEXT("hand_r"));
+	FName HeldWeaponSocket = FName(TEXT("RightHand"));
+
+	// Socket-relative grip transform — Sahar hand-placed these in-editor 2026-07-10 (values look
+	// huge because Meshy bone scales are tiny; relative units inflate by ~1/boneScale ≈ 30x).
+	UPROPERTY(EditAnywhere, Category = "LOOPED|HeroCopy")
+	FVector HeldWeaponRelLocation = FVector(1014.0f, -3168.0f, 118.0f);
 
 	UPROPERTY(EditAnywhere, Category = "LOOPED|HeroCopy")
-	FVector HeldWeaponWorldScale = FVector(0.3375f, 0.4f, 0.4f);
+	FRotator HeldWeaponRelRotation = FRotator(-12.123743f, -23.935277f, -134.0f);
 
 	UPROPERTY(EditAnywhere, Category = "LOOPED|HeroCopy")
-	FVector HeldWeaponGripOffset = FVector(12.0f, 10.6f, 26.6f);
+	FVector HeldWeaponRelScale = FVector(29.347837f, 34.782609f, 34.782584f);
 
 	// Death sequence: Die() fires gameplay events immediately, then plays a death anim or ragdolls;
 	// FinishDeathHide() hides the corpse once that finishes. bIsDying guards against double-death.

@@ -323,8 +323,8 @@ public:
 	UFUNCTION(Exec) void AddCurseCheat(FName Curse);
 	UFUNCTION(Exec) void ClearCursesCheat();
 
-	// Jump to L_FinalBoss as Floor 3 (final boss). Arg: 0 = normal 30% HeroCopy roll,
-	// 1 = force HeroCopy, 2 = force TheLooped. Example: "SkipToFloor3BossCheat 1"
+	// Boss-jump cheat. Arg: 0/2 = final floor TheLooped; 1 = force the HeroCopy mirror on its
+	// home floor (HeroCopyBossFloor, default 2). Example: "SkipToFloor3BossCheat 1"
 	UFUNCTION(Exec)
 	void SkipToFloor3BossCheat(int32 ForceHeroCopy = 0);
 
@@ -778,17 +778,23 @@ public:
 
 	// DT_Enemies row applied over the spawned boss per floor. Rows carry ABSOLUTE stats
 	// (no floor multiplication) — each row IS that floor's boss tuning. Floor 3 default = The Looped;
-	// Floor 3 may roll HeroCopy instead (see Floor3HeroCopyChance).
+	// HeroCopyBossFloor (default 2) may roll HeroCopy instead; the final floor never does.
 	UPROPERTY(EditAnywhere, Category = "LOOPED|Floors")
 	TArray<FName> FloorBossRows { FName(TEXT("FloorBoss1")), FName(TEXT("FloorBoss2")), FName(TEXT("TheLooped")) };
 
-	// Chance (0..1) that Floor 3 spawns the player's melee mirror (HeroCopy) instead of TheLooped.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Floors", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float Floor3HeroCopyChance = 0.30f;
+	// Which floor's boss may roll into the player's melee mirror (HeroCopy). Moved 3 -> 2
+	// (Sahar 2026-07-10): the finale stays the canonical 2-phase TheLooped; "the loop starts
+	// copying you" is the MID-run twist. Data knob — move the mirror without touching code.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Floors", meta = (ClampMin = "1"))
+	int32 HeroCopyBossFloor = 2;
 
-	// DT_Enemies row used when the Floor 3 hero-copy roll succeeds.
+	// Chance (0..1) that HeroCopyBossFloor's boss is the mirror instead of that floor's default.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Floors", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float HeroCopyBossChance = 0.30f;
+
+	// DT_Enemies row used when the hero-copy roll succeeds.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "LOOPED|Floors")
-	FName Floor3HeroCopyBossRow = FName(TEXT("HeroCopy"));
+	FName HeroCopyBossRow = FName(TEXT("HeroCopy"));
 
 	// Cached result of GetFloorBossRow for the current floor (mutable — const getter may roll once).
 	mutable int32 CachedFloorBossForFloor = 0;

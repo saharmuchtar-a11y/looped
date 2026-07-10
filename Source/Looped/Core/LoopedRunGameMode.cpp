@@ -278,8 +278,8 @@ void ALoopedRunGameMode::SpawnBossIfBossLevel()
 				UE_LOG(LogLoopedRun, Display, TEXT("Boss row '%s' applied (floor %d)."),
 					*BossRow.ToString(), FloorGI->GetCurrentFloor());
 			}
-			// Floor-3 hero-copy: melee mirror with hero mesh + Branch + player's deck snapshot.
-			if (BossRow == FloorGI->Floor3HeroCopyBossRow || BossRow == FName(TEXT("HeroCopy")))
+			// Hero-copy mirror (any floor — HeroCopyBossFloor decides): hero mesh + Branch + deck.
+			if (BossRow == FloorGI->HeroCopyBossRow || BossRow == FName(TEXT("HeroCopy")))
 			{
 				Boss->SetupAsHeroCopy();
 			}
