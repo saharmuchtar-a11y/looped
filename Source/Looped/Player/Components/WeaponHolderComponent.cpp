@@ -456,6 +456,13 @@ void UWeaponHolderComponent::PerformMeleeAttack()
 					Enemy->ApplyHeavyImpact(Forward, HeavyKnockbackSpeed * (bNextSwingPerfect ? 1.35f : 1.0f));
 				}
 				Enemy->TakeDamageFromPlayer(OutDamage, Owner);
+				// THE real on-hit pipeline (deck Burn/Venom/Lifesteal/Cryo + ChainSpark + Echo +
+				// StaticCapacitor + Static-curse gating). Built to replace the POC BP click chain,
+				// but that chain was its only caller — the weapon is now its one true entry point.
+				if (ALoopedCharacter* HitLC = Cast<ALoopedCharacter>(Owner))
+				{
+					HitLC->OnPlayerHitEnemy(Enemy);
+				}
 				bConnected = true;
 			}
 			ASimpleEnemy* SimpleEnemy = Cast<ASimpleEnemy>(HitActor);
@@ -529,6 +536,11 @@ void UWeaponHolderComponent::PerformHitscanAttack()
 		if (Enemy)
 		{
 			Enemy->TakeDamageFromPlayer(OutDamage, Owner);
+			// Same real on-hit pipeline as melee (deck effects + ChainSpark + Echo + relics).
+			if (ALoopedCharacter* HitLC = Cast<ALoopedCharacter>(Owner))
+			{
+				HitLC->OnPlayerHitEnemy(Enemy);
+			}
 		}
 
 		if (CachedPassiveStack)
